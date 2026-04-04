@@ -32,11 +32,13 @@ echo "  Homebrew: $(brew --version | head -1)"
 echo "  Python:   $(python3.12 --version)"
 echo ""
 
-# 1.3 — Python dependencies (MLX-native inference stack)
+# 1.3 — Python dependencies (MLX-native inference stack + TurboQuant)
 echo "[3/5] Installing Python dependencies..."
 python3.12 -m pip install huggingface-hub hf-transfer --break-system-packages
 python3.12 -m pip install git+https://github.com/ml-explore/mlx-lm --break-system-packages
+python3.12 -m pip install mlx-vlm --break-system-packages
 python3.12 -m pip install fastapi uvicorn httpx --break-system-packages
+echo "  mlx-vlm installed (provides TurboQuant KV cache compression)"
 echo ""
 
 # 1.4 — Environment variables
