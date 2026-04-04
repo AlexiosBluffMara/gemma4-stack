@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Gemma 4 Three-Tier Inference Stack
 #
 # Usage:
@@ -33,15 +31,16 @@ services:
       - OLLAMA_MAX_LOADED_MODELS=1
       - OLLAMA_HOST=0.0.0.0
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      # ollama is built into the image; curl is not
+      test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 18
+      start_period: 60s
     restart: unless-stopped
     entrypoint: >
       sh -c "ollama serve &
-             sleep 5 &&
+             sleep 8 &&
              ollama pull gemma4:e2b &&
              wait"
 
@@ -62,15 +61,15 @@ services:
       - OLLAMA_MAX_LOADED_MODELS=1
       - OLLAMA_HOST=0.0.0.0
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 18
+      start_period: 60s
     restart: unless-stopped
     entrypoint: >
       sh -c "ollama serve &
-             sleep 5 &&
+             sleep 8 &&
              ollama pull gemma4:e4b &&
              wait"
 
@@ -102,7 +101,7 @@ services:
       --reasoning off
       --no-warmup
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8081/health"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/health || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 20
@@ -126,10 +125,8 @@ services:
       - PRIMARY_URL=http://primary:11434
       - HEAVY_URL=http://heavy:8081
     depends_on:
-      fast:
-        condition: service_healthy
-      primary:
-        condition: service_healthy
+      - fast
+      - primary
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
       interval: 10s
