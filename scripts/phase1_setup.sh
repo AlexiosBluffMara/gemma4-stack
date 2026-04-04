@@ -23,20 +23,20 @@ echo ""
 # 1.2 — Install core dependencies
 echo "[2/5] Installing core dependencies via Homebrew..."
 eval "$(/opt/homebrew/bin/brew shellenv)"
-brew install ollama llama.cpp cmake git python@3.12
+brew install cmake git python@3.12
 echo ""
 
 # Verify installations
 echo "  Verifying..."
 echo "  Homebrew: $(brew --version | head -1)"
-echo "  Ollama:   $(ollama --version 2>&1)"
-echo "  llama.cpp: $(llama-server --version 2>&1 | head -1)"
 echo "  Python:   $(python3.12 --version)"
 echo ""
 
-# 1.3 — Python dependencies
+# 1.3 — Python dependencies (MLX-native inference stack)
 echo "[3/5] Installing Python dependencies..."
 python3.12 -m pip install huggingface-hub hf-transfer --break-system-packages
+python3.12 -m pip install git+https://github.com/ml-explore/mlx-lm --break-system-packages
+python3.12 -m pip install fastapi uvicorn httpx --break-system-packages
 echo ""
 
 # 1.4 — Environment variables
@@ -48,12 +48,6 @@ if ! grep -q "HF_HUB_ENABLE_HF_TRANSFER" ~/.zprofile 2>/dev/null; then
 
 # Hugging Face fast transfer
 export HF_HUB_ENABLE_HF_TRANSFER=1
-
-# Ollama inference settings for 16GB Mac Mini
-export OLLAMA_FLASH_ATTENTION=1
-export OLLAMA_KV_CACHE_TYPE=q8_0
-export OLLAMA_KEEP_ALIVE=10m
-export OLLAMA_MAX_LOADED_MODELS=1
 ENVEOF
     echo "  Environment variables added to ~/.zprofile"
 else
@@ -62,12 +56,16 @@ fi
 source ~/.zprofile
 echo ""
 
-# 1.5 — Create model storage
-echo "[5/5] Creating directories..."
-mkdir -p ~/.local/share/llama-models
-mkdir -p ~/ai-scripts
-echo "  ~/.local/share/llama-models created"
-echo "  ~/ai-scripts created"
+# 1.5 — Pre-download MLX models
+echo "[5/5] Pre-downloading E2B and E4B models..."
+python3.12 -c "
+from huggingface_hub import snapshot_download
+print('  Downloading E2B (~2.6 GB)...')
+snapshot_download('mlx-community/gemma-4-e2b-it-4bit')
+print('  Downloading E4B (~4.3 GB)...')
+snapshot_download('mlx-community/gemma-4-e4b-it-4bit')
+print('  Done!')
+"
 echo ""
 
 echo "============================================"

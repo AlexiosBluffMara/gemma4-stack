@@ -1,4 +1,4 @@
-# Model weights — never commit these (too large, sensitive)
+# Model weights — never commit (too large)
 *.gguf
 *.bin
 *.safetensors
@@ -37,8 +37,8 @@ venv/
 .DS_Store
 .AppleDouble
 
-# Docker
-.docker/
-
 # Backups
 *.bak
+
+# Node (if web UI grows)
+node_modules/

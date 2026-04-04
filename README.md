@@ -1,6 +1,6 @@
-# Gemma 4 Local Inference Stack
+# Gemma 4 Inference Network
 
-**Three-tier private AI inference on a $599 Mac Mini M4 — accessible anywhere via Tailscale.**
+**Multi-device private AI — Mac Mini + MacBook Pro + public web + iPhone, all via MLX.**
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Models: Gemma 4](https://img.shields.io/badge/Models-Gemma_4-orange.svg)](https://huggingface.co/google/gemma-4-E2B-it)
@@ -10,512 +10,260 @@
 
 ## What This Is
 
-A production-ready, self-hosted AI inference stack using Google's Gemma 4 model family. Routes requests intelligently across three tiers based on task complexity. Exposes a single OpenAI-compatible API endpoint, accessible from any device on your Tailscale network.
+A multi-device AI inference network built on Google's Gemma 4 model family, running entirely on Apple Silicon via MLX. A dedicated Mac Mini serves lightweight models 24/7, a MacBook Pro M4 Max contributes a heavy-class model when online, and a Google Cloud proxy makes the whole thing accessible from the public internet or a native iPhone app.
 
-**No API keys. No cloud bills. No data leaves your network.**
+**No API keys. No cloud GPU bills. No data leaves your hardware.**
 
 ```
-Client (any device on Tailscale)
-  │
-  ▼
-FastAPI Gateway :8080  ←  OpenAI-compatible /v1/chat/completions
-  │
-  ├── Tier 1 Fast    :8082  Gemma 4 E2B  (MLX 4-bit)  0.27s classify
-  ├── Tier 2 Primary :8083  Gemma 4 E4B  (MLX 4-bit)  1.57s summarize
-  └── Tier 3 Heavy   :8081  Gemma 4 26B  (llama.cpp)  ~1.6 tok/s
+PUBLIC INTERNET                       TAILSCALE MESH (private)
+    │                                     │
+    ▼                                     │
+ GCP Cloud Run ──── Tailscale ────────────┤
+ (proxy + web UI)   WireGuard             │
+    │                                     │
+    │         ┌───────────────────────────┤
+    │         │                           │
+    │    Mac Mini M4 16GB             MacBook Pro M4 Max
+    │    (always-on)                  (intermittent)
+    │    ├─ E2B MLX   :8082           ├─ 26B-A4B MLX :8084
+    │    ├─ E4B MLX   :8083           └─ 256K context
+    │    └─ Gateway   :8080               ~50-70 tok/s
+    │       126 tok/s + 32 tok/s
+    │                                     │
+    │         ┌───────────────────────────┘
+    │         │
+    └────► iPhone App
+           (public URL or Tailscale direct)
 ```
 
 ---
 
-## Measured Performance (Mac Mini M4, 16GB, macOS 26.3.1)
+## Devices & Models
 
-| Tier | Model | Engine | Speed | RAM Resident | Latency |
-|------|-------|--------|-------|-------------|---------|
-| Fast | E2B MLX 4-bit | MLX 0.31.2 | **126 tok/s** | 2.6 GB | **0.27s** classify |
-| Primary | E4B MLX 4-bit | MLX 0.31.2 | **32 tok/s** | 4.3 GB | **1.57s** summarize |
-| Heavy | 26B-A4B GGUF | llama.cpp CPU | **1.6 tok/s** | ~4 GB resident | 30-60s complex |
+| Device | Role | Model | Params (active) | Quantization | Speed | Status |
+|--------|------|-------|-----------------|-------------|-------|--------|
+| Mac Mini M4 16GB | Fast tier | `mlx-community/gemma-4-e2b-it-4bit` | 5.1B (2.3B) | 4-bit MLX | **126 tok/s** | Always on |
+| Mac Mini M4 16GB | Primary tier | `mlx-community/gemma-4-e4b-it-4bit` | 8.0B (4.5B) | 4-bit MLX | **32 tok/s** | Always on |
+| MacBook Pro M4 Max | Heavy tier | `mlx-community/gemma-4-26b-a4b-it-4bit` | 26B (3.8B) | 4-bit MLX | **~50-70 tok/s** | When online |
 
-> **Fast and Primary tiers are 6-9× faster than the original plan's targets** thanks to MLX's native Metal GPU path on Apple Silicon. The heavy tier runs CPU-only on 16 GB due to the Metal memory ceiling. See [Architecture Deep Dive](#architecture-deep-dive) and [Hardware Notes](#hardware-notes).
+### Why the 26B-A4B MoE on the MacBook Pro (not the 31B Dense)?
+
+Both models fit on the M4 Max (15.6 GB vs 18.4 GB at 4-bit). The decision comes down to throughput vs peak quality:
+
+| | 26B-A4B MoE | 31B Dense |
+|---|---|---|
+| **Total params** | 26B | 30.7B |
+| **Active per token** | 3.8B | 30.7B (all) |
+| **MLX 4-bit size** | 15.6 GB | 18.4 GB |
+| **Estimated tok/s (M4 Max)** | **50-70** | 20-30 |
+| **AIME 2026** | 88.3% | 89.2% |
+| **LMArena score** | 1441 | 1452 |
+| **Context window** | **256K** | 128K |
+
+**The MoE wins for serving.** 97% of the dense model's quality at 2-3x the throughput. Since the MacBook Pro is intermittent (not always on), when it IS online you want maximum throughput for the queue of requests that accumulated. The MoE also supports 256K context — 2x the dense model — critical for document analysis. If you need peak quality for a single difficult task, the dense 31B can be swapped in via a one-line model change.
+
+### Why NOT run E2B/E4B on the MacBook Pro too?
+
+The Mac Mini already serves E2B and E4B 24/7. Running them on the MacBook Pro would duplicate effort on the same lightweight tasks. The MacBook Pro's M4 Max (40-core GPU, 273 GB/s bandwidth) is wasted on a 2.3B model. **Dedicate scarce intermittent compute to what the Mac Mini cannot do well: the heavy tier.**
 
 ---
 
 ## Architecture Deep Dive
 
-### Why Apple Silicon Is Different: The Unified Memory Model
+### Unified Memory + MLX: Why This Works
 
-Every conventional AI inference setup involves a discrete GPU with its own VRAM, separated from system RAM by a PCIe bus. When a CUDA kernel needs model weights it copies them over that bus — a hard ceiling of ~64 GB/s on PCIe 4.0 x16. Apple M4's unified memory architecture eliminates this entirely:
-
-```
-Conventional GPU Server:               Apple M4 Mac Mini:
-┌──────────────────────┐               ┌────────────────────────────────────┐
-│ System RAM (DDR5)    │               │  Unified Memory (LPDDR5X 120 GB/s) │
-│  128 GB  @ 50 GB/s   │               │                                    │
-└──────────┬───────────┘               │  ┌──────────┐   ┌──────────────┐  │
-           │ PCIe 4.0 x16              │  │ CPU Dies │   │  GPU (10-c.) │  │
-           │ ~64 GB/s ceiling          │  │ (4P + 6E)│   │  Metal 3     │  │
-           ▼                           │  └────┬─────┘   └──────┬───────┘  │
-┌──────────────────────┐               │       │                 │          │
-│ VRAM (GDDR6X)        │               │       └────────┬────────┘          │
-│  24 GB  @ 1 TB/s     │               │                │                   │
-└──────────────────────┘               │    Fabric bus (all cores share)    │
-                                       └────────────────────────────────────┘
-```
-
-The M4's CPU, GPU, Neural Engine, and media engine all read from and write to the **same physical DRAM chips**. No copy. No bus bottleneck. Model weights loaded by the CPU are immediately accessible to the GPU at full memory bandwidth — **120 GB/s** vs PCIe's 64 GB/s ceiling. LLM inference is overwhelmingly memory-bandwidth-bound (not compute-bound), so this is the dominant hardware advantage.
-
----
-
-### Tier 1 — Fast: MLX E2B (`mlx-community/gemma-4-e2b-it-4bit`)
-
-**2.3B active parameters, 4-bit quantized, served on port 8082 by `mlx_lm.server`.**
+Apple Silicon's unified memory architecture means CPU and GPU share the same physical DRAM — no PCIe bus copies. MLX exploits this with zero-copy Metal kernel dispatch:
 
 ```
-Safetensors weights → MLX array (unified memory)
-                                │
-                      MLX lazy computation graph
-                                │
-                    Metal kernel (MSL) compilation
-                                │
-              GPU executes attention + FFN in-place
-               (same memory pool, zero data copy)
-                                │
-                       Token sampled → output
+Model weights (safetensors) → MLX array (unified memory)
+                                       │
+                             MLX lazy computation graph
+                                       │
+                           Metal kernel (MSL) dispatch
+                                       │
+                  GPU reads weights directly from same memory pool
+                           (no staging buffer, no transfer)
+                                       │
+                              Token sampled → output
 ```
 
-MLX represents model weights as arrays in unified memory. When a generation call arrives, MLX builds a lazy computation graph and dispatches Metal kernels that read directly from those arrays — no staging buffer, no host-to-device transfer. 4-bit quantization packs two weights into one byte, halving the effective memory bandwidth requirement. The dequantization kernel runs on-GPU, so throughput is limited only by raw memory bandwidth, not instruction throughput.
+4-bit quantization compresses weights ~8x vs fp32, halving the effective bandwidth demand. On the Mac Mini's 120 GB/s unified bus, the E2B model (1.15 GB working set) generates at 126 tok/s. On the M4 Max's 273 GB/s bus, the 26B MoE (only 3.8B active = ~1.9 GB compute working set) is expected to hit 50-70 tok/s.
 
-**Why it's fast:** 2.3B active params × 4-bit ≈ 1.15 GB working set — trivially inside the 12.7 GB Metal budget with substantial headroom for KV cache growth.
-
----
-
-### Tier 2 — Primary: MLX E4B (`mlx-community/gemma-4-e4b-it-4bit`)
-
-Same execution path as E2B. 8.0B total parameters, 4.5B active per token, ~2.25 GB working set at 4-bit. Runs **simultaneously with E2B** — together they consume ~3.5 GB, comfortably under the Metal limit, leaving the heavy tier able to operate in CPU mode without evicting either.
-
----
-
-### Tier 3 — Heavy: llama.cpp 26B-A4B + mmap
-
-This is where hardware physics imposes itself. The 26B-A4B GGUF weighs ~16 GB. The Metal `recommendedMaxWorkingSetSize` on a 16 GB M4 is **12.7 GB** (Apple reserves ~20% for OS, display, and other processes). GPU acceleration cannot fit the model. The solution is `mmap` with CPU inference:
+### Multi-Device Routing
 
 ```
-SSD (NVMe ~7.5 GB/s read)
-        │
-        │  OS page cache (kernel-managed)
-        ▼
-Virtual address space  ←── llama-server process
-        │                   "sees" all 16 GB via mmap
-        │
-        │  Physical RAM — only hot pages reside here:
-        ▼
-  Active expert weights   ≈ 4.0 GB resident
-  KV cache                ≈ 0.5 GB
-  Activations/overhead    ≈ 0.3 GB
-  ─────────────────────────────────
-  Total physical RAM use  ≈ 4.8 GB
-  Remaining for OS+tiers  ≈ 11 GB
+Request → Gateway (Mac Mini :8080)
+              │
+              ├─ classify_request()
+              │     │
+              │     ├── greeting, simple question → Fast (E2B, local)
+              │     ├── summarize, compress → Primary (E4B, local)
+              │     └── code, analysis, complex → Heavy (26B, MacBook Pro)
+              │
+              ├─ if heavy tier offline → fallback to Primary (E4B)
+              │                          with fallback note in response
+              │
+              └─ _routing: {"tier": "heavy", "device": "macbook-pro",
+                            "latency_ms": 1420, "fallback": false}
 ```
 
-`--mmap` instructs llama-server to use `mmap(2)` instead of `malloc` + `fread`. The OS maps the GGUF file's virtual pages into the process address space. When llama-server accesses an expert weight block not in physical RAM, the CPU takes a **page fault** — execution pauses, the OS reads the 4 KB page from SSD at ~7.5 GB/s, and resumes. Recently-used pages stay cached automatically.
+The gateway runs a background health checker every 30 seconds. When the MacBook Pro connects to Tailscale, the heavy tier auto-discovers as online. When the MacBook Pro sleeps or disconnects, heavy requests gracefully fall back to E4B.
 
-**The MoE architecture is what makes this viable.** A dense 26B model needs all 26B parameters resident per forward pass. This model's Mixture-of-Experts design activates only **4 of N expert sub-networks per token** — the hot working set is ~4B active params (~2 GB at Q4), not 26B. Inactive expert blocks are cold pages that live on SSD until called.
-
----
-
-### The Auto-Routing Gateway
+### Public Access via GCP Cloud Run
 
 ```
-Incoming request
-        │
-        ▼
-  classify_request()     ← keyword scan, no model call
-        │
-        ├─ "hello", "thanks", "what is", greeting → Tier 1 Fast
-        ├─ "summarize", "compress", "tldr", "digest" → Tier 2 Primary
-        └─ all other (complex, long, code, analysis) → Tier 1 Fast (default)
-                │                                      (escalate to Heavy if forced)
-                ▼
-        POST to selected tier's /v1/chat/completions
-                │
-                ▼
-        Unified response + _routing metadata:
-        {"tier": "fast", "latency_ms": 270}
+Browser (anywhere) → Cloud Run proxy (us-central1)
+                         │
+                         │ Tailscale sidecar (WireGuard)
+                         │
+                         └───→ Mac Mini 100.75.223.113:8080
+                                    │
+                                    ├── E2B (local)
+                                    ├── E4B (local)
+                                    └── 26B (→ MacBook Pro via Tailscale)
 ```
 
-The gateway also handles the Ollama/llama.cpp health check difference: Ollama exposes `/api/tags` (not `/health`). The gateway tries `/health` first and falls back to `/api/tags`, which is why both backends report `"ok"` through the same `/health` endpoint.
+The Cloud Run service costs ~$0/month under free tier (2M requests/month). It adds rate limiting (30 req/min/IP) and optional API key auth.
 
 ---
 
-## Advantages
+## TurboQuant: KV Cache Compression (Future Optimization)
 
-### 1. Privacy by Design — Structurally Air-Gapped
-Every token stays on-device. For use cases involving proprietary code, legal documents, medical records, or personal data, local inference is non-negotiable. You cannot accidentally expose sensitive context to a third-party API. GDPR, HIPAA, attorney-client privilege — all satisfied structurally rather than contractually.
+[TurboQuant](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/) is a KV cache quantization technique from Google (ICLR 2026) that compresses the inference cache 3-5x with near-lossless quality. An [MLX implementation](https://github.com/rachittshah/mlx-turboquant) already exists.
 
-### 2. True Zero Marginal Cost After Break-Even
-At $1.50/hr for an A100 spot instance running 8 hrs/day: $360/month. The $599 Mac Mini breaks even in ~50 days. After that, inference is effectively free — roughly $5-8/month in electricity. At 200 requests/day × 500 tokens each, you'd pay $60-120/month on GPT-4o-mini. On this stack: $0 ongoing.
+### Why It Matters for This Stack
 
-### 3. Apple Silicon Memory Bandwidth Advantage
-120 GB/s unified memory bandwidth vs ~50 GB/s for typical server DDR5. For small models (E2B/E4B), you're getting bandwidth that rivals mid-range GPU cards at a fraction of the cost and power draw. This is why 126 tok/s on E2B is achievable on a $599 machine.
+The KV cache is the second-largest memory consumer after model weights. At 16K tokens of context, the KV cache for the 26B model can exceed 4 GB. With TurboQuant:
 
-### 4. Native Multimodal on All Tiers
-Gemma 4 supports text + vision + audio (E2B/E4B) and text + vision (26B). Most $599 self-hosted setups give you text-only. Image and audio understanding on a machine this size is genuinely unusual.
+| Scenario | Without TurboQuant | With TurboQuant (3-bit) | Savings |
+|----------|-------------------|------------------------|---------|
+| E4B @ 8K context | ~1.2 GB KV cache | ~260 MB | 4.6x |
+| 26B @ 16K context | ~4.2 GB KV cache | ~910 MB | 4.6x |
+| 26B @ 64K context | ~16.8 GB KV cache | ~3.6 GB | 4.6x |
+| 26B @ 256K context | ~67 GB KV cache | ~14.5 GB | 4.6x |
 
-### 5. OpenAI-Compatible API Surface
-Any tool built against OpenAI's API — LangChain, LlamaIndex, Continue.dev, Cursor, Aider, Open WebUI, n8n — works against this stack with one base URL change. Zero migration cost.
+**On the Mac Mini (16 GB):** TurboQuant enables long-context E4B inference that would otherwise OOM. A 32K-token summarization that requires ~2.4 GB KV cache drops to ~520 MB.
 
-### 6. Tailscale Mesh — Zero Infrastructure Overhead
-No port forwarding, no dynamic DNS, no cloud proxy, no VPN server to maintain. Anyone you add to your Tailscale network hits `http://100.75.223.113:8080` from anywhere in the world. WireGuard-based, cryptographically authenticated, zero open ports on your router.
+**On the MacBook Pro M4 Max (36 GB+):** TurboQuant unlocks the full 256K context window of the 26B model. Without compression, 256K context needs ~67 GB of KV cache — impossible even on 48 GB. With 3-bit TurboQuant, it drops to ~14.5 GB — fits comfortably alongside the 15.6 GB model weights.
 
-### 7. MoE Efficiency Is Unusually Well-Matched to Constrained Memory
-A dense 26B model on 16 GB would not run at all. The MoE architecture's small active-parameter footprint is what makes mmap viable — 26B-class reasoning ability on a 4B-class RAM budget per token.
+### Integration Path
 
----
+```bash
+pip install mlx-turboquant   # or clone from GitHub
 
-## Disadvantages
-
-### 1. The 16 GB Hard Ceiling — The Dominant Constraint
-The `recommendedMaxWorkingSetSize` of 12.7 GB means GPU acceleration stops for models above ~10 GB at 4-bit. The heavy tier runs at **1.6 tok/s** instead of a potential 15-25 tok/s on 24 GB. This is a 10-15× performance gap that no software change can close — it is a physics constraint imposed by the memory subsystem. The heavy tier is viable for background/async tasks, not interactive streaming.
-
-### 2. Effective Single-Tenancy
-The fast and primary tiers handle modest concurrency (MLX queues requests). The heavy tier cannot: `--parallel 1` with CPU inference means a second request queues and waits several minutes while the first completes. This setup serves one person well, a small team tolerably for non-interactive workloads, and real concurrent multi-user demand poorly.
-
-### 3. Docker ≠ MLX
-MLX requires the Metal framework, which requires native macOS on Apple Silicon. Docker containers use Ollama (llama.cpp backend) instead. You lose 3-8× inference speed in containers. The Docker path is for cross-platform portability, not performance.
-
-### 4. Sustained CPU Inference Thermals
-When the heavy tier runs CPU-only inference, all 10 cores peg at 100%. On the Mac Mini's passive cooling, sustained inference beyond ~10 minutes triggers thermal throttling, dropping tok/s from ~1.59 to ~0.9. The machine stays functional; inference degrades nonlinearly.
-
-### 5. SSD Wear from mmap Paging
-Heavy mmap usage reads weight pages from SSD on cache misses. At ~400 KB read per token × 50,000 tokens/day → ~20 GB/day of SSD reads → the M4's 600 TBW endurance would take ~82 years to exhaust at this rate. Not a real concern in practice, but it means the SSD is active during inference, which can marginally slow other I/O.
-
-### 6. No Fine-Tuning
-This stack is inference-only. Training even a small LoRA adapter on E2B at 4-bit requires gradient buffers, optimizer state, and activation storage — easily 3-4× inference memory. You'd hit OOM on 16 GB for anything beyond a toy experiment.
-
-### 7. No Redundancy or Failover
-Single machine, single point of failure. No load balancing, no hot standby. If the Mac Mini goes down, all tiers go down. Acceptable for personal use; not acceptable for any production SLA.
-
----
-
-## Cost Effectiveness
-
-### Hardware Break-Even vs Cloud
-
-| Setup | Cost | 26B Speed | Break-Even vs A100 Spot |
-|-------|------|-----------|------------------------|
-| **Mac Mini M4 16GB** | **$599** | 1.6 tok/s CPU | **~50 days** |
-| Mac Mini M4 Pro 24GB | $1,399 | ~15-20 tok/s GPU | ~116 days |
-| Mac Studio M4 Max 96GB | $3,999 | ~50-70 tok/s GPU | ~333 days |
-| Mac Studio M4 Ultra 192GB | $9,999 | ~80-110 tok/s GPU | ~833 days |
-| Cloud A100 (spot, $1.50/hr) | ongoing | 80-120 tok/s | never |
-| Cloud H100 (spot, $2.50/hr) | ongoing | 150-250 tok/s | never |
-
-`Break-even = hardware cost ÷ ($1.50/hr × 8 hrs/day × 30 days/month)`
-After break-even: **~$5-8/month electricity for unlimited private inference.**
-
----
-
-## Upgrade Path & Funding Tiers
-
-> All prices reflect **Apple for Education** (~10-15% off retail) or **Apple Business Program** estimates. Retail prices in parentheses. Apple Financial Services leasing options noted where relevant.
-
----
-
-### 🔵 Tier 0 — What This Repo Runs On: ~$599
-**Mac Mini M4 | 16 GB | 10-core CPU | 10-core GPU**
-
-| Capability | Status |
-|---|---|
-| E2B fast tier (GPU, MLX) | ✅ 126 tok/s |
-| E4B primary tier (GPU, MLX) | ✅ 32 tok/s |
-| 26B-A4B heavy tier | ⚠️ 1.6 tok/s CPU-only |
-| All tiers simultaneously | ✅ (heavy runs CPU alongside GPU tiers) |
-| Concurrent users | ~1 effectively |
-| Largest GPU model | ~8B |
-| Fine-tuning | ❌ |
-| Vision | ✅ |
-| Audio | ✅ (E2B/E4B only) |
-
-**Good for:** Personal productivity, private document analysis, solo developer copilot, triage/routing pipelines, learning and experimentation.
-
----
-
-### 🟢 Tier 1 — Critical Upgrade: ~$1,200–1,700
-**Mac Mini M4 Pro | 24 GB | 12-core CPU | 20-core GPU**
-*(Retail ~$1,399 → Edu ~$1,219)*
-
-**The most important upgrade threshold in this entire stack.**
-
-The Metal `recommendedMaxWorkingSetSize` on 24 GB is **~19 GB**. The 16 GB GGUF fits with 3 GB to spare for KV cache and activations. `--gpu-layers 99` now works. This is the boundary where the heavy tier goes from "background task" to "interactive use."
-
-| Metric | Tier 0 (16 GB) | Tier 1 (24 GB) | Delta |
-|---|---|---|---|
-| 26B generation speed | 1.6 tok/s (CPU) | ~15-20 tok/s (GPU) | **+10-12×** |
-| All tiers GPU-accelerated simultaneously | ❌ | ✅ | New capability |
-| Concurrent users | ~1 | ~3-5 | +3-4 |
-| Largest GPU model | ~8B | ~13B | +5B |
-
-**What becomes possible:**
-- Heavy tier is now viable for interactive streaming (~15 tok/s renders in real time)
-- All three tiers resident in Metal simultaneously, no stopping/starting
-- Can serve a small team of 3-5 concurrent users
-- 70B models at extreme quantization (Q2_K) become marginal
-
-**Incremental cost over Tier 0:** ~$620 edu. The single highest return-on-investment upgrade available in this architecture.
-
----
-
-### 🟡 Tier 2 — Serious Capability: ~$3,500–5,500
-
-Three options at this price point depending on use case:
-
-| Machine | RAM | GPU Cores | Bandwidth | Edu Price | Best For |
-|---|---|---|---|---|---|
-| Mac Mini M4 Pro 48 GB | 48 GB | 20-core | 120 GB/s | ~$1,659 | Cost-per-GB efficiency |
-| Mac Studio M4 Max 36 GB | 36 GB | 40-core | 410 GB/s | ~$1,749 | Speed + headroom |
-| Mac Studio M4 Max 96 GB | 96 GB | 40-core | 410 GB/s | ~$3,499 | Large models + concurrency |
-
-**The M4 Max's memory bandwidth jump: 120 GB/s → 410 GB/s (3.4×).** Since LLM generation is memory-bandwidth-bound, this translates almost linearly into ~3× generation speed for the same model at the same quantization — without any software changes.
-
-| Metric | Tier 1 (24 GB) | Tier 2 (96 GB M4 Max) | Delta |
-|---|---|---|---|
-| 26B tok/s | 15-20 | 50-70 | **+3-4×** |
-| 70B models | ❌ | ✅ ~20-30 tok/s | New capability |
-| Concurrent users | ~3-5 | ~10-20 | +15 |
-| LoRA fine-tuning (E2B/E4B) | ❌ | ✅ | New capability |
-| 128K context window | marginal | comfortable | Qualitative |
-
-**What becomes possible:**
-- 70B models (Llama 3.3 70B, Qwen 2.5 72B) at GPU speed
-- LoRA fine-tuning on the smaller tiers — adapt models to your domain
-- True multi-user concurrent inference for a team of 10-20
-- Batch document processing (legal review, codebase analysis) at practical throughput
-- Speculative decoding: run a small draft model + large verifier model simultaneously
-
----
-
-### 🟠 Tier 3 — Production Grade: ~$8,500–10,000
-**Mac Studio M4 Ultra | 192 GB | 32-core CPU | 80-core GPU | 800 GB/s**
-*(Retail ~$9,999 → Edu ~$8,499, or Apple Financial Services leasing ~$350/mo)*
-
-This is the inflection point where the constraint shifts from hardware memory to application design.
-
-| Metric | Tier 2 (96 GB) | Tier 3 (192 GB Ultra) | Delta |
-|---|---|---|---|
-| 26B tok/s | 50-70 | 80-110 | +60% |
-| 70B tok/s | 20-30 | 55-80 | **+2.5×** |
-| 405B class (Q4 ~200 GB) | ❌ | ✅ ~8-12 tok/s | New capability |
-| Concurrent users | 10-20 | 30-60 | +40 |
-| Full 70B LoRA fine-tuning | ❌ | ✅ | New capability |
-| All Gemma 4 models simultaneously | ❌ | ✅ | New capability |
-
-**What becomes possible:**
-- Full Gemma 4 family (E2B + E4B + 26B + 27B dense) all resident simultaneously — no eviction, no tier conflicts
-- Llama 3.1 405B at Q4 (~200 GB) barely fits — genuinely frontier-scale open-source inference on a single machine
-- Full LoRA fine-tuning on 70B class models for domain adaptation
-- Multimodal batch pipelines: process hundreds of images or audio files per hour
-- Production SLA for a team of 30-60 concurrent users
-- Speculative decoding at full scale
-
-> **Note:** The M4 Ultra is two M4 Max dies connected via Apple's die-to-die interconnect at 32 GB/s. The OS presents a single 192 GB flat address space. MLX and llama.cpp both see one pool — no distributed programming required.
-
----
-
-### 🔴 Tier 4 — Research Cluster: ~$20,000–40,000
-**2-4× Mac Studio M4 Ultra + 10 GbE switch + NAS**
-*(2× Ultra ~$17,000 edu + switch/NAS ~$3,000-8,000)*
-
-At this tier, the architecture changes from a single machine to a small cluster. Orchestration becomes the design problem:
-
-```
-                    ┌─────────────────────────────┐
-                    │   10 GbE / 25 GbE Switch     │
-                    └──┬───────┬───────┬───────────┘
-                       │       │       │
-              ┌────────┴──┐ ┌──┴────┐ ┌┴──────────┐
-              │ Ultra #1   │ │Ultra#2│ │ NAS (RAID)│
-              │ 192 GB     │ │192 GB │ │  ~50 TB   │
-              │ Tiers 1-2  │ │Tier 3 │ │ Model Zoo │
-              └────────────┘ └───────┘ └───────────┘
-                       │
-              ┌────────┴───────────┐
-              │  Load balancer     │
-              │  (gateway.py ×2)   │
-              └────────────────────┘
+# Drop-in replacement in MLX model serving:
+from mlx_turboquant.cache import TurboQuantKVCache
+cache = [TurboQuantKVCache(bits=3, head_dim=128) for _ in range(num_layers)]
 ```
 
-**What becomes possible:**
-- **Model parallelism:** Run a single 400B+ model split across two machines using llama.cpp's RPC backend or MLX-LM distributed mode
-- **A/B testing infrastructure:** Route 50% of traffic to each machine for model comparison
-- **Simultaneous fine-tuning + production inference:** Dedicate one machine to training while the other serves traffic
-- **High availability failover:** If one machine goes down, the gateway reroutes — no downtime
-- **NAS model zoo:** Keep all model variants on shared storage, hot-swap without re-downloading
-- **100+ concurrent users** with proper load balancing
+Benchmarks from [mlx-turboquant](https://github.com/rachittshah/mlx-turboquant) show **0.995+ cosine similarity** at 4-bit and **0.97+** at 3-bit — effectively lossless for real-world tasks.
 
----
+### SwiftLM: Native Swift Alternative
 
-### 🟣 Tier 5 — AI Lab: ~$60,000–100,000
-**4-6× Mac Pro M4 Ultra + ProRes infrastructure + high-speed networking**
-*(Mac Pro M4 Ultra ~$12,000-16,000 edu each)*
-
-At this scale you're building a genuine **internal AI research lab**:
-
-- Full pre-training runs on small models (1-3B) — not just fine-tuning
-- Custom tokenizer training and evaluation harness infrastructure running continuously
-- Synthetic data generation pipeline (use cheap models to generate training data for expensive ones)
-- Multi-modal training: vision encoder alignment, audio integration
-- Dedicated embedding and re-ranking infrastructure for enterprise-scale RAG
-- CI/CD for model versions: train → eval → deploy without human intervention
-- Integration with Final Cut Pro, Logic Pro, and Core ML for creative/multimodal research
-
-The Apple ecosystem compounds here: **Final Cut Pro, Logic Pro, Core ML, Create ML** all run natively on the same hardware. Video understanding, audio transcription, and multimodal AI pipelines share the same machines — no GPU time-slicing between creative and AI workloads.
-
----
-
-### Upgrade Summary
-
-| Tier | Budget | Hardware | Key Unlock | Heavy Tier Speed | Concurrent Users |
-|------|--------|----------|------------|-----------------|-----------------|
-| 0 | $599 | Mac Mini M4 16GB | Foundation, private AI | 1.6 tok/s (CPU) | ~1 |
-| 1 | ~$1,700 | Mac Mini M4 Pro 24GB | **26B goes GPU — 10× speedup** | 15-20 tok/s | 3-5 |
-| 2 | ~$3,500-5,500 | Mac Studio M4 Max 96GB | **70B models + LoRA fine-tuning** | 50-70 tok/s | 10-20 |
-| 3 | ~$8,500 | Mac Studio M4 Ultra 192GB | **405B class + true production** | 80-110 tok/s | 30-60 |
-| 4 | ~$20,000-40,000 | 2-4× Ultra + NAS | **Cluster, failover, model parallel** | 160-220 tok/s | 100+ |
-| 5 | ~$60,000-100,000 | Mac Pro cluster | **Pre-training, full research lab** | training-scale | org |
-
-> **The single highest-leverage upgrade is Tier 0 → Tier 1 (16 GB → 24 GB).** The 10-15× improvement in heavy tier throughput is the largest performance-per-dollar gain available anywhere in this stack. Everything above it is incremental. The 24 GB threshold is where the model physically fits in Metal's working set — a qualitative architectural shift, not just a speed improvement.
+[SwiftLM](https://github.com/SharpAI/SwiftLM) is a pure Swift/Metal inference server with TurboQuant built in. It eliminates Python's GIL overhead entirely, includes an iOS companion app ([SwiftBuddy](https://github.com/SharpAI/SwiftLM)), and supports SSD streaming for MoE expert weights. This is a potential future replacement for the `mlx_lm.server` backend that would also solve the iPhone app requirement natively.
 
 ---
 
 ## Quick Start
 
-### Option A: Native macOS (Recommended — best performance)
+### Mac Mini (always-on server)
 
 ```bash
 # 1. Clone
 git clone https://github.com/AlexiosBluffMara/gemma4-stack
 cd gemma4-stack
 
-# 2. Install dependencies (interactive — needs your password for Homebrew)
+# 2. Bootstrap (Homebrew, Python 3.12, mlx-lm, download models)
 bash scripts/phase1_setup.sh
+source ~/.zprofile
 
-# 3. Start Fast + Primary tiers
-bash scripts/start_fast.sh
-bash scripts/start_primary.sh
+# 3. Start everything
+bash scripts/start_fast.sh       # E2B on :8082
+bash scripts/start_primary.sh    # E4B on :8083
+bash scripts/start_gateway.sh    # Gateway on :8080
 
-# 4. Start gateway
-bash scripts/start_gateway.sh
-
-# 5. Verify
+# 4. Verify
 curl http://localhost:8080/health
 # → {"tiers": {"fast": "ok", "primary": "ok", "heavy": "offline"}}
 
-# 6. Test
+# 5. Test
 curl http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"messages": [{"role": "user", "content": "Hello!"}], "max_tokens": 50}'
 ```
 
-### Option B: Docker (Cross-platform — Linux, Windows, macOS)
-
-> **Note:** Docker runs CPU-only inference on all platforms (MLX requires native macOS + Apple Silicon). Expect ~15-25 tok/s for E2B/E4B vs 126 tok/s native.
+### MacBook Pro M4 Max (heavy tier)
 
 ```bash
-# 1. Clone
+# 1. Clone (same repo)
 git clone https://github.com/AlexiosBluffMara/gemma4-stack
 cd gemma4-stack
 
-# 2. Configure
-cp docker/.env.example docker/.env
+# 2. Setup (installs MLX, downloads 26B model — ~15.6 GB)
+bash scripts/setup-macbook.sh
 
-# 3. Start always-on tiers (models auto-download on first start, ~17 GB)
-cd docker
-docker compose up -d fast primary gateway
-
-# 4. Watch model download progress
-docker compose logs -f fast
-
-# 5. Verify (wait ~5-15 minutes for model downloads on first run)
-curl http://localhost:8080/health
-
-# 6. (Optional) Start heavy tier
-python3 scripts/download_heavy.py --dir ./models
-docker compose --profile heavy up -d heavy
-```
-
----
-
-## Heavy Tier Setup
-
-The 26B-A4B model is ~17 GB and must be downloaded separately:
-
-```bash
-# Install downloader deps
-pip install huggingface-hub hf-transfer
-
-# Download (~20-45 minutes, auto-resumes)
-python3 scripts/download_heavy.py
-
-# Native macOS — start heavy tier
-bash scripts/start_heavy.sh
-
-# Docker — mount models dir and start
-docker compose --profile heavy up -d heavy
-```
-
----
-
-## Tailscale Mesh Access
-
-Share the stack with any device on your Tailscale network:
-
-### macOS Setup
-```bash
-# Install official Tailscale (Homebrew CLI alone is not enough — needs the .pkg)
-# Download: https://pkgs.tailscale.com/stable/#macos
-# Install .pkg → approve Network Extension in System Settings
-
+# 3. Set up Tailscale (so the Mac Mini can reach this machine)
 bash scripts/setup_tailscale.sh
-# Prints all access URLs once connected
+
+# 4. Start the heavy tier
+bash scripts/start-macbook.sh
+# → 26B-A4B serving on :8084
+
+# 5. Tell the Mac Mini gateway where to find you
+# On the Mac Mini, set the env var before starting the gateway:
+export HEAVY_URL="http://<macbook-tailscale-ip>:8084"
+bash scripts/start_gateway.sh
 ```
 
-### Use from Any Device
-```python
-from openai import OpenAI
+### Tailscale Mesh (both devices)
 
-client = OpenAI(
-    base_url="http://<your-tailscale-ip>:8080",
-    api_key="not-required"
-)
+```bash
+# On each device:
+# 1. Install official .pkg from https://pkgs.tailscale.com/stable/#macos
+# 2. Approve Network Extension in System Settings
+# 3. Run:
+bash scripts/setup_tailscale.sh
+```
 
-response = client.chat.completions.create(
-    model="auto",
-    messages=[{"role": "user", "content": "Summarize this PR diff: ..."}]
-)
-print(response.choices[0].message.content)
-print(response._routing)  # {"tier": "primary", "latency_ms": 1570}
+### Public Web Access (GCP Cloud Run)
+
+```bash
+# Deploy the proxy + web UI to Cloud Run
+cd cloud
+bash deploy.sh YOUR_GCP_PROJECT_ID
+
+# The script prints your public URL:
+# → https://gemma4-proxy-xxxxx-uc.a.run.app
+# Anyone can now chat with your models from a browser.
 ```
 
 ---
 
 ## API Reference
 
-All endpoints on the gateway at `:8080`.
+All endpoints on the gateway at `:8080` (or through the Cloud Run proxy).
 
 ### `POST /v1/chat/completions` — OpenAI-compatible
 ```json
 {
   "messages": [{"role": "user", "content": "your message"}],
   "max_tokens": 512,
-  "tier": "fast"
+  "temperature": 0.0,
+  "tier": "heavy"
 }
 ```
-> `"tier"` is optional — omit to auto-route. Values: `"fast"` | `"primary"` | `"heavy"`
+> `"tier"` is optional. Omit for auto-routing. Values: `"fast"` | `"primary"` | `"heavy"`.
 
 Response includes routing metadata:
 ```json
 {
   "choices": [...],
-  "_routing": {"tier": "primary", "latency_ms": 1640}
+  "_routing": {
+    "tier": "heavy",
+    "device": "macbook-pro",
+    "latency_ms": 1420,
+    "fallback": false
+  }
 }
 ```
 
@@ -532,7 +280,27 @@ Response includes routing metadata:
 → `{"compressed": "...", "latency_ms": 1570}`
 
 ### `GET /health`
-→ `{"tiers": {"fast": "ok", "primary": "ok", "heavy": "offline"}}`
+```json
+{"tiers": {"fast": "ok", "primary": "ok", "heavy": "offline"}}
+```
+
+### `GET /devices`
+```json
+{
+  "mac-mini": {
+    "ip": "100.75.223.113",
+    "capabilities": ["e2b", "e4b", "gateway"],
+    "status": "online",
+    "last_seen": "2026-04-04T17:30:00Z"
+  },
+  "macbook-pro": {
+    "ip": "100.x.x.x",
+    "capabilities": ["26b-a4b"],
+    "status": "offline",
+    "last_seen": null
+  }
+}
+```
 
 ### `GET /metrics`
 → Per-tier request counts and p50/p95 latency histograms
@@ -541,75 +309,56 @@ Response includes routing metadata:
 
 ## Production Use Cases
 
-### Tier 1 — Fast (0.27s, 126 tok/s) — Always On
+### Tier 1 — Fast: E2B (0.27s, 126 tok/s, always on)
 | Use Case | Integration |
 |----------|------------|
 | Slack/Discord message triage | Webhook → `POST /classify` |
 | Email ticket routing | Per-email → classify to queue |
 | Git pre-commit hook | Reject vague commit messages in <0.5s |
 | Intent detection | Classify voice transcription before routing |
-| Content moderation | Gate all submissions before storage |
+| Content moderation | Gate all UGC before storage |
 
-### Tier 2 — Primary (1.57s, 32 tok/s) — Always On
+### Tier 2 — Primary: E4B (1.57s, 32 tok/s, always on)
 | Use Case | Integration |
 |----------|------------|
 | PR diff summarizer | GitHub webhook → auto-summary on every PR |
 | Meeting transcript digest | Daily cron → compress transcripts |
 | Vector DB chunking | Pre-ingest pipeline → chunk + summarize |
-| Standup aggregator | Team async updates → single digest |
 | Release notes drafts | CI trigger → changelog from git log |
 
-### Tier 3 — Heavy (30-60s, 1.6 tok/s CPU) — On-Demand
+### Tier 3 — Heavy: 26B-A4B (~50-70 tok/s on M4 Max, when online)
 | Use Case | Integration |
 |----------|------------|
-| Deep code review | Manual trigger or PR open webhook |
+| Deep code review | PR webhook → escalate to heavy tier |
 | Technical documentation | Post-deploy → draft API docs |
-| Incident postmortem | Feed structured data → full postmortem |
-| Architecture analysis | On request → trade-off analysis |
-| Complex SQL generation | Escalate when Tier 2 is insufficient |
+| Long document analysis | Feed 256K context → structured output |
+| Architecture trade-off analysis | On-demand via web UI |
+| Complex SQL generation | When E4B is insufficient → escalate |
 
 ---
 
-## Hardware Notes
+## Cost Analysis
 
-### Why 16 GB Is Enough for Tiers 1 & 2
-MLX runs E2B and E4B natively on the M4 GPU with 4-bit quantization, using only 2.6 GB and 4.3 GB respectively. Total footprint for both tiers + macOS ≈ 10 GB, leaving 6 GB headroom.
+### Hardware
 
-### Why 16 GB Limits the 26B Heavy Tier
-The 26B-A4B GGUF is 16 GB on disk. When llama.cpp tries to offload all layers to Metal, the combined weight buffers + KV cache + activations exceed the M4's `recommendedMaxWorkingSetSize` of 12.7 GB. Result: `kIOGPUCommandBufferCallbackErrorOutOfMemory`.
+| Device | Cost | Monthly Cloud Equivalent | Break-Even |
+|--------|------|-------------------------|------------|
+| Mac Mini M4 16GB | $599 | $360/mo (A100 spot 8h/day) | **50 days** |
+| MacBook Pro M4 Max 36GB | ~$3,499 | $600/mo (A100 spot full-day) | ~6 months |
+| GCP Cloud Run proxy | ~$0/mo | — | Immediate |
+| **Total** | **~$4,100** | **~$960/mo cloud** | **~4.3 months** |
 
-**Solution used:** `--gpu-layers 0` — CPU-only via Apple Accelerate/BLAS. Reliable at ~1.6 tok/s.
+After break-even: **~$8/month electricity** for unlimited private inference across both devices.
 
-**For GPU-accelerated 26B:** Requires 24 GB+ unified memory (Mac Mini M4 Pro ≥$1,399).
+### Funding Tiers (Apple for Education/Business pricing)
 
-### mmap Explained
-`mmap` maps a file into the process's virtual address space without reading it into RAM upfront. The OS loads only the pages actively accessed. For a MoE model:
-- Total weights: 26B (16 GB on disk)
-- Active per token: 4B (only selected experts fire)
-- RAM resident: ~4-5 GB at any time
-- Rest: on SSD, fetched on demand at ~7.5 GB/s when page-faulted
-
-**Advantages:** No OOM crashes; zero-copy load (maps in seconds); OS handles hot/cold pages automatically; graceful performance degradation instead of cliff-edge failure.
-
-**Drawbacks:** SSD bandwidth becomes the throughput floor on cache misses; latency variance per token (2-10× depending on what's cached); marginal SSD wear; can cause system-wide I/O pressure under sustained load.
-
----
-
-## Architecture: Native vs Docker
-
-```
-Native macOS (fast path):          Docker (portable path):
-────────────────────────           ───────────────────────
-E2B: mlx_lm server :8082           E2B: ollama :8082 (llama.cpp backend)
-E4B: mlx_lm server :8083           E4B: ollama :8083 (llama.cpp backend)
-26B: llama-server  :8081           26B: llama.cpp:server :8081
-GW:  uvicorn/fastapi :8080         GW:  uvicorn/fastapi :8080
-
-LaunchAgents auto-start E2B,       docker compose manages lifecycle
-E4B, gateway on login.             Heavy tier uses --profile heavy
-Metal GPU acceleration             CPU-only (MLX = macOS native only)
-126 tok/s E2B                      ~18-25 tok/s E2B
-```
+| Tier | Budget | What You Get | Key Unlock |
+|------|--------|-------------|------------|
+| 0 | **$599** | Mac Mini M4 16GB — E2B + E4B always-on | Private AI foundation |
+| 1 | **~$4,100** | + MacBook Pro M4 Max 36GB — 26B heavy tier | **50-70 tok/s heavy, 256K context** |
+| 2 | **~$5,800** | + Mac Mini M4 Pro 24GB (redundancy) | High availability, GPU 26B on Mini too |
+| 3 | **~$12,500** | + Mac Studio M4 Ultra 192GB (replace MacBook) | 405B models, 100+ concurrent users |
+| 4 | **~$25,000** | Multi-Ultra cluster + NAS | Model parallelism, A/B testing, fine-tuning |
 
 ---
 
@@ -621,32 +370,68 @@ gemma4-stack/
 ├── .gitignore
 │
 ├── scripts/
-│   ├── gateway.py               ← FastAPI auto-routing gateway
+│   ├── gateway.py               ← Multi-device FastAPI gateway
 │   ├── local_llm.py             ← Python SDK for tier routing
 │   ├── benchmark.py             ← Benchmark all active tiers
 │   ├── health_check.sh          ← Check all services
-│   ├── start_fast.sh            ← Start E2B (MLX, :8082)
-│   ├── start_primary.sh         ← Start E4B (MLX, :8083)
-│   ├── start_heavy.sh           ← Start 26B (llama.cpp, :8081)
-│   ├── start_gateway.sh         ← Start FastAPI gateway (:8080)
-│   ├── stop_*.sh                ← Stop individual tiers
-│   ├── setup_tailscale.sh       ← Tailscale setup walkthrough
-│   ├── download_heavy.py        ← Download 26B GGUF from HF
-│   └── phase1_setup.sh          ← Full environment bootstrap
+│   │
+│   ├── phase1_setup.sh          ← Mac Mini full bootstrap
+│   ├── setup-macbook.sh         ← MacBook Pro M4 Max bootstrap
+│   ├── setup_tailscale.sh       ← Tailscale mesh setup
+│   │
+│   ├── start_fast.sh            ← Start E2B (MLX :8082)
+│   ├── start_primary.sh         ← Start E4B (MLX :8083)
+│   ├── start_gateway.sh         ← Start gateway (:8080)
+│   ├── start-macbook.sh         ← Start 26B on MacBook Pro (:8084)
+│   │
+│   ├── stop_fast.sh             ← Stop E2B
+│   ├── stop_primary.sh          ← Stop E4B
+│   └── stop-macbook.sh          ← Stop 26B on MacBook Pro
 │
-├── docker/
-│   ├── docker-compose.yml       ← Orchestrate all tiers
-│   ├── Dockerfile.gateway       ← Gateway container
-│   ├── Dockerfile.fast          ← Fast tier (Ollama)
-│   ├── Dockerfile.heavy         ← Heavy tier (llama.cpp)
-│   └── .env.example             ← Environment config template
+├── cloud/
+│   ├── deploy.sh                ← GCP Cloud Run deploy script
+│   ├── proxy/
+│   │   ├── main.py              ← Cloud Run proxy (FastAPI)
+│   │   ├── Dockerfile
+│   │   └── requirements.txt
+│   └── web/
+│       └── index.html           ← Public web chat UI
 │
 ├── notebooks/
-│   └── gemma4_local_inference.ipynb  ← Full implementation analysis
+│   └── gemma4_local_inference.ipynb
 │
 └── docs/
-    └── IMPLEMENTATION_LOG.md    ← Plan vs reality, deviations, lessons
+    └── IMPLEMENTATION_LOG.md
 ```
+
+---
+
+## iPhone App
+
+The architecture supports two paths for iOS access:
+
+### Path 1: Web App (works now)
+The Cloud Run web UI is responsive and works on iOS Safari. Add to Home Screen for an app-like experience. No App Store submission required.
+
+### Path 2: Native SwiftUI App (planned)
+A native iOS app connecting to either:
+- **Public URL** (Cloud Run proxy) — works from anywhere
+- **Tailscale IP** (direct) — lower latency on private network
+
+The app would show device status, let you pick tiers, stream responses, and store chat history locally. [SwiftLM's SwiftBuddy](https://github.com/SharpAI/SwiftLM) is a reference implementation that already handles model downloads and on-device inference — useful if the iPhone should also run the E2B model locally for offline use.
+
+---
+
+## Future Optimizations
+
+| Optimization | Impact | Effort | Status |
+|-------------|--------|--------|--------|
+| **TurboQuant KV cache** | 4.6x cache compression → 256K context on M4 Max | Medium | [MLX impl available](https://github.com/rachittshah/mlx-turboquant) |
+| **SwiftLM backend** | Eliminate Python GIL, native Metal, built-in TurboQuant | High | [Exists, needs eval](https://github.com/SharpAI/SwiftLM) |
+| **8-bit models on M4 Max 48GB+** | Higher quality (Q8 vs Q4) at same throughput | Low | Model exists: `mlx-community/gemma-4-26b-a4b-mxfp8` |
+| **Speculative decoding** | Use E2B as draft model for 26B verification | Medium | MLX supports this |
+| **LaunchAgents** | Auto-start tiers on boot (Mac Mini) | Low | Plist files ready |
+| **Cloudflare Tunnel** | Alternative to GCP for public access | Low | Free tier available |
 
 ---
 
@@ -655,29 +440,28 @@ gemma4-stack/
 | Problem | Fix |
 |---------|-----|
 | `gemma4 not supported` in mlx-lm | Install from GitHub: `pip install git+https://github.com/ml-explore/mlx-lm` |
-| Metal `Insufficient Memory` on 26B | Use `start_heavy.sh cpu` — CPU-only mode bypasses Metal |
+| Heavy tier always "offline" | MacBook Pro must be awake + connected to Tailscale + `start-macbook.sh` running |
+| Gateway doesn't see MacBook Pro | Set `HEAVY_URL=http://<tailscale-ip>:8084` before starting gateway |
 | Tailscale daemon not running | Install official .pkg from pkgs.tailscale.com (Homebrew CLI alone is not enough) |
 | Duplicate MLX server processes | `pkill -f "mlx_lm server"` then restart |
-| llama-server `--n-parallel` error | Use `--parallel` (correct long-form flag) |
-| Docker containers unhealthy | `curl` is not in the Ollama image — healthcheck uses `ollama list` in this repo |
-| Docker models not downloading | `docker compose logs -f fast` — first pull is ~3.5 GB, takes 5-15 min |
-| Heavy tier hangs indefinitely | GPU mode with 16 GB RAM — use `--gpu-layers 0` (already set in scripts) |
-
----
-
-## Implementation Notes
-
-See [`docs/IMPLEMENTATION_LOG.md`](docs/IMPLEMENTATION_LOG.md) for the full plan-vs-reality log including:
-- Why MLX was chosen over Ollama for native tiers (5-8× faster, 55-63% less RAM)
-- Why the 26B tier uses llama.cpp instead of MLX (Metal OOM on 16 GB)
-- Why mlx-lm needed GitHub main instead of PyPI (Gemma 4 architecture not in 0.31.1)
-- Why Tailscale requires the official .pkg on macOS (Network Extension)
-- Why Docker healthchecks use `ollama list` instead of `curl` (curl not in image)
-- Tailscale live deployment: `100.75.223.113`, confirmed working 2026-04-04
+| Cloud Run deploy fails | Ensure `gcloud` is authenticated and billing is enabled on the project |
+| Web UI shows both devices red | Gateway may be down; check `curl http://localhost:8080/health` on Mac Mini |
 
 ---
 
 ## License
 
-Models: Apache 2.0 (Google Gemma 4, Unsloth quantizations)
+Models: Apache 2.0 (Google Gemma 4)
 Code: Apache 2.0
+
+---
+
+Sources for technical claims:
+- [Gemma 4 model card & benchmarks](https://huggingface.co/blog/gemma4)
+- [Google blog: Gemma 4 announcement](https://blog.google/innovation-and-ai/technology/developers-tools/gemma-4/)
+- [TurboQuant: Google Research](https://research.google/blog/turboquant-redefining-ai-efficiency-with-extreme-compression/)
+- [mlx-turboquant: MLX implementation](https://github.com/rachittshah/mlx-turboquant)
+- [SwiftLM: Native Swift inference](https://github.com/SharpAI/SwiftLM)
+- [MLX 26B-A4B model](https://huggingface.co/mlx-community/gemma-4-26b-a4b-it-4bit) (15.6 GB)
+- [MLX 31B Dense model](https://huggingface.co/mlx-community/gemma-4-31b-it-4bit) (18.4 GB)
+- [Gemma 4 vs Qwen 3.5 vs Llama 4 benchmarks](https://ai.rs/ai-developer/gemma-4-vs-qwen-3-5-vs-llama-4-compared)
