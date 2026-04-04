@@ -1,0 +1,22 @@
+# Tier 1 — Fast (E2B) and Tier 2 — Primary (E4B)
+# Uses Ollama for cross-platform GGUF inference (CPU on Linux/Windows, GPU on supported hardware)
+# Note: On macOS native, use MLX instead (5-8x faster). See README.
+FROM ollama/ollama:latest
+
+# Environment
+ENV OLLAMA_FLASH_ATTENTION=1
+ENV OLLAMA_KV_CACHE_TYPE=q8_0
+ENV OLLAMA_KEEP_ALIVE=10m
+ENV OLLAMA_MAX_LOADED_MODELS=1
+ENV OLLAMA_HOST=0.0.0.0
+
+# Pull models at build time (optional — can also pull at runtime)
+# Uncomment to bake models into the image (~17GB larger image):
+# RUN ollama serve & sleep 5 && ollama pull gemma4:e2b && ollama pull gemma4:e4b
+
+EXPOSE 11434
+
+HEALTHCHECK --interval=10s --timeout=5s --retries=5 \
+  CMD curl -sf http://localhost:11434/api/tags || exit 1
+
+CMD ["serve"]

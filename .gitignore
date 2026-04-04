@@ -1,0 +1,44 @@
+# Model weights — never commit these (too large, sensitive)
+*.gguf
+*.bin
+*.safetensors
+models/
+*.incomplete
+*.part
+
+# Hugging Face cache
+.cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb~
+
+# Logs and runtime
+*.log
+*.err
+*.pid
+/tmp/
+
+# Secrets
+.env
+!.env.example
+*.key
+*.pem
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Docker
+.docker/
+
+# Backups
+*.bak

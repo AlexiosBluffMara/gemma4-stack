@@ -1,0 +1,146 @@
+version: "3.9"
+
+# Gemma 4 Three-Tier Inference Stack
+#
+# Usage:
+#   docker compose up -d fast primary gateway   # always-on tiers
+#   docker compose up -d heavy                   # on-demand heavy tier
+#
+# Models:
+#   E2B / E4B: pulled automatically by Ollama on first request
+#   26B GGUF:  download first → python scripts/download_heavy.py
+#              then mount from ./models/
+#
+# Environment:
+#   Copy .env.example → .env and fill in TAILSCALE_AUTHKEY if using Tailscale sidecar
+
+services:
+
+  # ─────────────────────────────────────────────
+  # Tier 1 — Fast (E2B, 2.3B effective params)
+  # ─────────────────────────────────────────────
+  fast:
+    image: ollama/ollama:latest
+    container_name: gemma4-fast
+    ports:
+      - "8082:11434"
+    volumes:
+      - ollama_fast:/root/.ollama
+    environment:
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=q8_0
+      - OLLAMA_KEEP_ALIVE=10m
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    entrypoint: >
+      sh -c "ollama serve &
+             sleep 5 &&
+             ollama pull gemma4:e2b &&
+             wait"
+
+  # ─────────────────────────────────────────────
+  # Tier 2 — Primary (E4B, 4.5B effective params)
+  # ─────────────────────────────────────────────
+  primary:
+    image: ollama/ollama:latest
+    container_name: gemma4-primary
+    ports:
+      - "8083:11434"
+    volumes:
+      - ollama_primary:/root/.ollama
+    environment:
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=q8_0
+      - OLLAMA_KEEP_ALIVE=10m
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    entrypoint: >
+      sh -c "ollama serve &
+             sleep 5 &&
+             ollama pull gemma4:e4b &&
+             wait"
+
+  # ─────────────────────────────────────────────
+  # Tier 3 — Heavy (26B-A4B, llama.cpp + mmap)
+  # On-demand: start manually when needed
+  # ─────────────────────────────────────────────
+  heavy:
+    image: ghcr.io/ggerganov/llama.cpp:server
+    container_name: gemma4-heavy
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./models:/models:ro
+    environment:
+      - MODEL_PATH=/models/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf
+      - CTX_SIZE=${HEAVY_CTX_SIZE:-4096}
+      - THREADS=${HEAVY_THREADS:-8}
+    command: >
+      /app/llama-server
+      --model /models/gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf
+      --port 8081
+      --host 0.0.0.0
+      --ctx-size ${HEAVY_CTX_SIZE:-4096}
+      --mmap
+      --threads ${HEAVY_THREADS:-8}
+      --gpu-layers 0
+      --parallel 1
+      --reasoning off
+      --no-warmup
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8081/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+    profiles:
+      - heavy
+    restart: "no"
+
+  # ─────────────────────────────────────────────
+  # API Gateway — OpenAI-compatible auto-router
+  # ─────────────────────────────────────────────
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gateway
+    container_name: gemma4-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - FAST_URL=http://fast:11434
+      - PRIMARY_URL=http://primary:11434
+      - HEAVY_URL=http://heavy:8081
+    depends_on:
+      fast:
+        condition: service_healthy
+      primary:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  ollama_fast:
+  ollama_primary:
+
+networks:
+  default:
+    name: gemma4-net
