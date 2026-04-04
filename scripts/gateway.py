@@ -7,6 +7,7 @@ Devices:
 
 Endpoints:
   POST /v1/chat/completions  — OpenAI-compatible, auto-routes across tiers
+  POST /v1/media/analyze     — Convenience wrapper for multimodal analysis
   POST /classify             — Fast tier classification only
   POST /compress             — Primary tier compression only
   GET  /health               — Status of all three tiers
@@ -149,6 +150,24 @@ async def _health_loop(app: FastAPI) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Multimodal helpers
+# ---------------------------------------------------------------------------
+
+def _has_media(messages: list) -> bool:
+    """Check if any message contains multimodal content (images or audio)."""
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") in (
+                    "image_url",
+                    "input_audio",
+                ):
+                    return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Forwarding helpers
 # ---------------------------------------------------------------------------
 
@@ -171,6 +190,23 @@ async def _forward(
     )
     r.raise_for_status()
     return r.json()
+
+
+def _extract_text(messages: list) -> str:
+    """Extract the last user message text, handling both string and multimodal formats."""
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts = []
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text_parts.append(part.get("text", ""))
+            return " ".join(text_parts)
+    return ""
 
 
 async def _classify(client: httpx.AsyncClient, text: str) -> str:
@@ -244,6 +280,13 @@ class CompressRequest(BaseModel):
     words: Optional[int] = 30
 
 
+class MediaAnalyzeRequest(BaseModel):
+    media_url: str  # base64 data URL, e.g. "data:image/jpeg;base64,..."
+    media_type: str = "image"  # "image", "audio", or "video"
+    prompt: str = "Describe this in detail"
+    tier: Optional[str] = None  # optional tier override
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -303,12 +346,21 @@ async def chat(req: ChatRequest, request: Request):
         # Determine tier
         if req.tier and req.tier in TIER_MAP:
             tier = req.tier
+        elif _has_media(req.messages):
+            # Media requests: prefer heavy for best quality, fall back to primary
+            # Never route media to fast tier (E2B can handle it but E4B is better)
+            if _tier_status.get("heavy"):
+                tier = "heavy"
+            else:
+                tier = "primary"
+                if not _tier_status.get("primary"):
+                    fallback_note = (
+                        "Heavy tier offline, primary tier also offline. "
+                        "Attempting primary anyway for media request."
+                    )
         else:
             # Auto-route based on fast classification of last user message
-            last_user = next(
-                (m["content"] for m in reversed(req.messages) if m["role"] == "user"),
-                "",
-            )
+            last_user = _extract_text(req.messages)
             category = await _classify(client, last_user)
             if category in ("greeting", "fyi"):
                 tier = "fast"
@@ -321,7 +373,7 @@ async def chat(req: ChatRequest, request: Request):
         # Heavy tier fallback: if heavy is offline, use primary
         if tier == "heavy" and not _tier_status.get("heavy"):
             tier = "primary"
-            fallback_note = (
+            fallback_note = fallback_note or (
                 "Heavy tier (26B-A4B on MacBook Pro) is offline. "
                 "Falling back to primary tier (E4B)."
             )
@@ -346,6 +398,52 @@ async def chat(req: ChatRequest, request: Request):
     except Exception as e:
         _metrics["errors"] += 1
         raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.post("/v1/media/analyze")
+async def media_analyze(req: MediaAnalyzeRequest, request: Request):
+    """Convenience endpoint for multimodal analysis.
+
+    Constructs the proper OpenAI multimodal message format from a simple
+    media_url + prompt payload, then forwards to the appropriate tier.
+    """
+    # Build the multimodal content parts
+    content_parts = [
+        {"type": "text", "text": req.prompt},
+    ]
+
+    if req.media_type == "image":
+        content_parts.append({
+            "type": "image_url",
+            "image_url": {"url": req.media_url},
+        })
+    elif req.media_type == "audio":
+        content_parts.append({
+            "type": "input_audio",
+            "input_audio": {"data": req.media_url, "format": "wav"},
+        })
+    elif req.media_type == "video":
+        # Video is treated as image_url (many backends accept video this way)
+        content_parts.append({
+            "type": "image_url",
+            "image_url": {"url": req.media_url},
+        })
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported media_type: {req.media_type}. Use 'image', 'audio', or 'video'.",
+        )
+
+    messages = [{"role": "user", "content": content_parts}]
+
+    # Build a ChatRequest and delegate to the chat endpoint
+    chat_req = ChatRequest(
+        messages=messages,
+        max_tokens=1024,
+        temperature=0.0,
+        tier=req.tier,
+    )
+    return await chat(chat_req, request)
 
 
 @app.post("/classify")

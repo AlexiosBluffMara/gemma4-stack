@@ -2,8 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Gemma 4 Inference Network</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Gemma 4">
+<meta name="theme-color" content="#0f1117">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="data:application/json;base64,eyJuYW1lIjoiR2VtbWEgNCIsInNob3J0X25hbWUiOiJHZW1tYSA0Iiwic3RhcnRfdXJsIjoiLyIsImRpc3BsYXkiOiJzdGFuZGFsb25lIiwiYmFja2dyb3VuZF9jb2xvciI6IiMwZjExMTciLCJ0aGVtZV9jb2xvciI6IiMwZjExMTciLCJpY29ucyI6W119">
+<title>Gemma 4</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -24,9 +30,11 @@
     --radius: 12px;
     --font-mono: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', monospace;
     --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-top: env(safe-area-inset-top, 0px);
   }
 
-  html, body { height: 100%; }
+  html, body { height: 100%; overflow: hidden; touch-action: manipulation; }
 
   body {
     font-family: var(--font-sans);
@@ -34,7 +42,7 @@
     color: var(--text);
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    padding-top: var(--safe-top);
   }
 
   /* ---- Header ---- */
@@ -46,19 +54,12 @@
     background: var(--surface);
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
+    z-index: 10;
   }
 
-  .logo {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
+  .logo { display: flex; align-items: center; gap: 10px; }
 
-  .logo h1 {
-    font-size: 16px;
-    font-weight: 600;
-    letter-spacing: -0.3px;
-  }
+  .logo h1 { font-size: 16px; font-weight: 600; letter-spacing: -0.3px; }
 
   .logo .badge {
     font-size: 10px;
@@ -70,35 +71,30 @@
     font-weight: 500;
   }
 
-  .devices {
-    display: flex;
-    gap: 16px;
-    align-items: center;
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-
-  .device {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-  }
+  .devices { display: flex; gap: 16px; align-items: center; font-size: 12px; color: var(--text-muted); }
+  .device { display: flex; align-items: center; gap: 5px; }
 
   .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--red);
-    transition: background 0.3s;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--red); transition: background 0.3s;
   }
-
   .dot.online { background: var(--green); }
   .dot.checking { background: var(--yellow); animation: pulse 1s infinite; }
 
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+  /* ---- Error banner ---- */
+  .error-banner {
+    background: rgba(248,113,113,0.12);
+    color: var(--red);
+    font-size: 13px;
+    padding: 10px 20px;
+    text-align: center;
+    border-bottom: 1px solid rgba(248,113,113,0.2);
+    display: none;
+    flex-shrink: 0;
   }
+  .error-banner.visible { display: block; }
 
   /* ---- Chat area ---- */
   #chat {
@@ -109,12 +105,34 @@
     flex-direction: column;
     gap: 8px;
     scroll-behavior: smooth;
+    -webkit-overflow-scrolling: touch;
+    position: relative;
   }
 
   #chat::-webkit-scrollbar { width: 6px; }
   #chat::-webkit-scrollbar-track { background: transparent; }
   #chat::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
+  /* ---- Drop zone overlay ---- */
+  .drop-overlay {
+    display: none;
+    position: absolute;
+    inset: 0;
+    background: rgba(108,140,255,0.12);
+    border: 2px dashed var(--accent);
+    border-radius: var(--radius);
+    z-index: 50;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 8px;
+    pointer-events: none;
+  }
+  .drop-overlay.active { display: flex; }
+  .drop-overlay-icon { font-size: 48px; opacity: 0.6; }
+  .drop-overlay-text { font-size: 16px; color: var(--accent); font-weight: 500; }
+
+  /* ---- Messages ---- */
   .msg {
     max-width: 75%;
     padding: 12px 16px;
@@ -122,7 +140,6 @@
     line-height: 1.55;
     font-size: 14px;
     animation: fadeIn 0.25s ease-out;
-    white-space: pre-wrap;
     word-break: break-word;
   }
 
@@ -160,11 +177,40 @@
     border-radius: 8px;
     overflow-x: auto;
     margin: 8px 0;
+    white-space: pre-wrap;
   }
 
-  .msg.assistant pre code {
-    background: none;
-    padding: 0;
+  .msg.assistant pre code { background: none; padding: 0; }
+
+  .msg-text { white-space: pre-wrap; }
+
+  .msg-attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+
+  .msg-attachments img {
+    max-width: 300px;
+    max-height: 200px;
+    border-radius: 8px;
+    cursor: pointer;
+    object-fit: cover;
+    transition: transform 0.15s;
+  }
+  .msg-attachments img:hover { transform: scale(1.02); }
+
+  .msg-attachments audio {
+    height: 36px;
+    border-radius: 8px;
+    max-width: 260px;
+  }
+
+  .msg-media-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(255,255,255,0.06);
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--text-muted);
   }
 
   .routing-info {
@@ -189,13 +235,11 @@
   }
 
   .typing span {
-    width: 7px;
-    height: 7px;
+    width: 7px; height: 7px;
     background: var(--text-muted);
     border-radius: 50%;
     animation: bounce 1.2s infinite;
   }
-
   .typing span:nth-child(2) { animation-delay: 0.15s; }
   .typing span:nth-child(3) { animation-delay: 0.3s; }
 
@@ -216,17 +260,109 @@
     text-align: center;
     padding: 40px;
   }
-
   .empty-state .icon { font-size: 36px; opacity: 0.4; margin-bottom: 4px; }
   .empty-state h2 { font-size: 18px; font-weight: 500; color: var(--text); }
   .empty-state p { font-size: 13px; max-width: 360px; line-height: 1.5; }
+
+  /* ---- Preview strip ---- */
+  .preview-strip {
+    display: none;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 20px 0 20px;
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+  .preview-strip.has-items { display: flex; }
+
+  .preview-item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 6px 10px;
+    max-width: 220px;
+    animation: fadeIn 0.2s ease-out;
+  }
+
+  .preview-item img {
+    width: 48px;
+    height: 48px;
+    object-fit: cover;
+    border-radius: 6px;
+    flex-shrink: 0;
+  }
+
+  .preview-item-info {
+    font-size: 12px;
+    color: var(--text-muted);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  .preview-item-name {
+    font-size: 12px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 120px;
+  }
+
+  .preview-item-size { font-size: 11px; color: var(--text-muted); }
+
+  .preview-item .play-btn {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    background: var(--accent-dim);
+    border: none;
+    color: #fff;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+
+  .preview-remove {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    background: var(--red);
+    border: 2px solid var(--surface);
+    color: #fff;
+    font-size: 11px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    padding: 0;
+  }
+
+  .processing-indicator {
+    font-size: 12px;
+    color: var(--yellow);
+    font-family: var(--font-mono);
+    padding: 4px 0;
+    animation: pulse 1s infinite;
+  }
 
   /* ---- Input bar ---- */
   .input-bar {
     display: flex;
     align-items: flex-end;
-    gap: 10px;
-    padding: 14px 20px;
+    gap: 8px;
+    padding: 12px 20px;
+    padding-bottom: calc(12px + var(--safe-bottom));
     background: var(--surface);
     border-top: 1px solid var(--border);
     flex-shrink: 0;
@@ -243,14 +379,60 @@
     outline: none;
     cursor: pointer;
     flex-shrink: 0;
+    min-height: 44px;
+  }
+  .tier-select:focus { border-color: var(--accent); }
+
+  .input-btn {
+    width: 44px; height: 44px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    flex-shrink: 0;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .input-btn:hover { background: var(--border); color: var(--text); }
+  .input-btn:active { background: var(--accent-dim); }
+
+  .input-btn.recording {
+    background: rgba(248,113,113,0.15);
+    border-color: var(--red);
+    color: var(--red);
+    animation: pulse-rec 1.5s infinite;
+  }
+  @keyframes pulse-rec {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(248,113,113,0.4); }
+    50% { box-shadow: 0 0 0 6px rgba(248,113,113,0); }
   }
 
-  .tier-select:focus { border-color: var(--accent); }
+  .recording-indicator {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--red);
+    font-family: var(--font-mono);
+    flex-shrink: 0;
+  }
+  .recording-indicator.active { display: flex; }
+  .rec-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+    animation: pulse 1s infinite;
+  }
 
   #input {
     flex: 1;
     font-family: var(--font-sans);
-    font-size: 14px;
+    font-size: 16px;
     color: var(--text);
     background: var(--surface2);
     border: 1px solid var(--border);
@@ -258,17 +440,16 @@
     padding: 10px 14px;
     resize: none;
     outline: none;
-    min-height: 42px;
+    min-height: 44px;
     max-height: 150px;
     line-height: 1.45;
+    -webkit-appearance: none;
   }
-
   #input::placeholder { color: var(--text-muted); }
   #input:focus { border-color: var(--accent); }
 
   #send {
-    width: 42px;
-    height: 42px;
+    width: 44px; height: 44px;
     background: var(--accent);
     border: none;
     border-radius: 10px;
@@ -279,25 +460,35 @@
     justify-content: center;
     flex-shrink: 0;
     transition: background 0.15s;
+    -webkit-tap-highlight-color: transparent;
   }
-
   #send:hover { background: var(--accent-dim); }
   #send:disabled { opacity: 0.4; cursor: default; }
-
   #send svg { width: 18px; height: 18px; }
 
-  /* ---- Error banner ---- */
-  .error-banner {
-    background: rgba(248,113,113,0.12);
-    color: var(--red);
-    font-size: 13px;
-    padding: 10px 20px;
-    text-align: center;
-    border-bottom: 1px solid rgba(248,113,113,0.2);
+  /* ---- Fullscreen image viewer ---- */
+  .image-viewer {
     display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    background: rgba(0,0,0,0.9);
+    align-items: center;
+    justify-content: center;
+    cursor: zoom-out;
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+  }
+  .image-viewer.active { display: flex; }
+  .image-viewer img {
+    max-width: 95vw;
+    max-height: 95vh;
+    object-fit: contain;
+    border-radius: 4px;
   }
 
-  .error-banner.visible { display: block; }
+  /* ---- Hidden file inputs ---- */
+  .hidden-input { position: absolute; width: 0; height: 0; opacity: 0; overflow: hidden; }
 
   /* ---- Responsive ---- */
   @media (max-width: 600px) {
@@ -305,9 +496,14 @@
     .logo h1 { font-size: 14px; }
     .devices { font-size: 11px; gap: 10px; }
     #chat { padding: 14px; }
-    .msg { max-width: 90%; font-size: 13px; }
-    .input-bar { padding: 10px 14px; gap: 8px; }
-    .tier-select { padding: 8px 6px; font-size: 11px; }
+    .msg { max-width: 90%; font-size: 14px; }
+    .input-bar { padding: 8px 10px; padding-bottom: calc(8px + var(--safe-bottom)); gap: 6px; }
+    .tier-select { padding: 8px 6px; font-size: 11px; min-height: 44px; }
+    .preview-strip { padding: 8px 10px 0 10px; }
+  }
+
+  @media (min-width: 601px) {
+    .btn-camera { display: none; }
   }
 </style>
 </head>
@@ -333,12 +529,18 @@
 <div class="error-banner" id="error-banner"></div>
 
 <div id="chat">
+  <div class="drop-overlay" id="drop-overlay">
+    <div class="drop-overlay-icon">&#128206;</div>
+    <div class="drop-overlay-text">Drop files here</div>
+  </div>
   <div class="empty-state" id="empty-state">
     <div class="icon">&#9670;</div>
     <h2>Gemma 4 Inference Network</h2>
-    <p>Send a message to start chatting. Requests are routed through the cloud proxy to your local Mac Mini gateway over Tailscale.</p>
+    <p>Send a message to start chatting. Attach images, audio, or video for multimodal analysis. Requests route through the cloud proxy to your local devices over Tailscale.</p>
   </div>
 </div>
+
+<div class="preview-strip" id="preview-strip"></div>
 
 <div class="input-bar">
   <select class="tier-select" id="tier">
@@ -347,6 +549,13 @@
     <option value="primary">primary</option>
     <option value="heavy">heavy</option>
   </select>
+  <button class="input-btn" id="btn-attach" title="Attach file">&#128206;</button>
+  <button class="input-btn btn-camera" id="btn-camera" title="Camera">&#128247;</button>
+  <button class="input-btn" id="btn-mic" title="Record audio">&#127897;</button>
+  <div class="recording-indicator" id="rec-indicator">
+    <div class="rec-dot"></div>
+    <span id="rec-time">0:00</span>
+  </div>
   <textarea id="input" rows="1" placeholder="Send a message..."></textarea>
   <button id="send" title="Send">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -356,8 +565,20 @@
   </button>
 </div>
 
+<!-- Hidden file inputs -->
+<input type="file" class="hidden-input" id="file-input" accept="image/*,audio/*,video/*" multiple>
+<input type="file" class="hidden-input" id="camera-input" accept="image/*" capture="environment">
+
+<!-- Fullscreen image viewer -->
+<div class="image-viewer" id="image-viewer">
+  <img id="viewer-img" src="" alt="Full size">
+</div>
+
 <script>
 (function() {
+  'use strict';
+
+  // ---- DOM refs ----
   const chatEl = document.getElementById('chat');
   const inputEl = document.getElementById('input');
   const sendBtn = document.getElementById('send');
@@ -366,8 +587,39 @@
   const errorBanner = document.getElementById('error-banner');
   const dotMini = document.getElementById('dot-mini');
   const dotMbp = document.getElementById('dot-mbp');
+  const previewStrip = document.getElementById('preview-strip');
+  const fileInput = document.getElementById('file-input');
+  const cameraInput = document.getElementById('camera-input');
+  const btnAttach = document.getElementById('btn-attach');
+  const btnCamera = document.getElementById('btn-camera');
+  const btnMic = document.getElementById('btn-mic');
+  const recIndicator = document.getElementById('rec-indicator');
+  const recTimeEl = document.getElementById('rec-time');
+  const dropOverlay = document.getElementById('drop-overlay');
+  const imageViewer = document.getElementById('image-viewer');
+  const viewerImg = document.getElementById('viewer-img');
 
   let sending = false;
+  let attachments = []; // {file, type, dataUrl, previewUrl, frames}
+  let mediaRecorder = null;
+  let audioChunks = [];
+  let recStartTime = 0;
+  let recTimer = null;
+  let dragCounter = 0;
+
+  // ---- Utility ----
+  function formatSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1048576).toFixed(1) + ' MB';
+  }
+
+  function getMediaType(file) {
+    if (file.type.startsWith('image/')) return 'image';
+    if (file.type.startsWith('audio/')) return 'audio';
+    if (file.type.startsWith('video/')) return 'video';
+    return 'unknown';
+  }
 
   // ---- Auto-resize textarea ----
   inputEl.addEventListener('input', function() {
@@ -385,7 +637,360 @@
 
   sendBtn.addEventListener('click', sendMessage);
 
-  // ---- Fetch health on load ----
+  // ---- Ctrl+V / Cmd+V paste images ----
+  document.addEventListener('paste', function(e) {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith('image/')) {
+        e.preventDefault();
+        const file = items[i].getAsFile();
+        if (file) addAttachment(file);
+      }
+    }
+  });
+
+  // ---- File input buttons ----
+  btnAttach.addEventListener('click', function() { fileInput.click(); });
+  btnCamera.addEventListener('click', function() { cameraInput.click(); });
+
+  fileInput.addEventListener('change', function() {
+    for (const f of this.files) addAttachment(f);
+    this.value = '';
+  });
+
+  cameraInput.addEventListener('change', function() {
+    for (const f of this.files) addAttachment(f);
+    this.value = '';
+  });
+
+  // ---- Drag and drop ----
+  chatEl.addEventListener('dragenter', function(e) {
+    e.preventDefault();
+    dragCounter++;
+    dropOverlay.classList.add('active');
+  });
+
+  chatEl.addEventListener('dragleave', function(e) {
+    e.preventDefault();
+    dragCounter--;
+    if (dragCounter <= 0) {
+      dragCounter = 0;
+      dropOverlay.classList.remove('active');
+    }
+  });
+
+  chatEl.addEventListener('dragover', function(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+
+  chatEl.addEventListener('drop', function(e) {
+    e.preventDefault();
+    dragCounter = 0;
+    dropOverlay.classList.remove('active');
+    const files = e.dataTransfer.files;
+    for (const f of files) {
+      if (f.type.startsWith('image/') || f.type.startsWith('audio/') || f.type.startsWith('video/')) {
+        addAttachment(f);
+      }
+    }
+  });
+
+  // ---- Audio recording ----
+  btnMic.addEventListener('click', toggleRecording);
+
+  function toggleRecording() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  }
+
+  async function startRecording() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunks = [];
+
+      // Prefer WAV-compatible format, fallback gracefully
+      const mimeOptions = ['audio/wav', 'audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', ''];
+      let selectedMime = '';
+      for (const mime of mimeOptions) {
+        if (!mime || MediaRecorder.isTypeSupported(mime)) {
+          selectedMime = mime;
+          break;
+        }
+      }
+
+      mediaRecorder = selectedMime
+        ? new MediaRecorder(stream, { mimeType: selectedMime })
+        : new MediaRecorder(stream);
+
+      mediaRecorder.addEventListener('dataavailable', function(e) {
+        if (e.data.size > 0) audioChunks.push(e.data);
+      });
+
+      mediaRecorder.addEventListener('stop', function() {
+        stream.getTracks().forEach(function(t) { t.stop(); });
+        const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+        const ext = (mediaRecorder.mimeType || '').includes('wav') ? 'wav' : 'webm';
+        const file = new File([blob], 'recording.' + ext, { type: blob.type });
+        addAttachment(file);
+      });
+
+      mediaRecorder.start(100);
+      recStartTime = Date.now();
+      btnMic.classList.add('recording');
+      recIndicator.classList.add('active');
+      updateRecTime();
+      recTimer = setInterval(updateRecTime, 500);
+    } catch (err) {
+      showError('Microphone access denied: ' + err.message);
+    }
+  }
+
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      mediaRecorder.stop();
+    }
+    btnMic.classList.remove('recording');
+    recIndicator.classList.remove('active');
+    clearInterval(recTimer);
+    recTimer = null;
+  }
+
+  function updateRecTime() {
+    const elapsed = Math.floor((Date.now() - recStartTime) / 1000);
+    const m = Math.floor(elapsed / 60);
+    const s = elapsed % 60;
+    recTimeEl.textContent = m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  // ---- Attachments management ----
+  function addAttachment(file) {
+    const type = getMediaType(file);
+    const entry = { file: file, type: type, dataUrl: null, previewUrl: null, frames: null };
+
+    if (type === 'image') {
+      entry.previewUrl = URL.createObjectURL(file);
+    }
+
+    attachments.push(entry);
+
+    if (type === 'video') {
+      extractVideoFrames(entry);
+    }
+
+    renderPreviews();
+  }
+
+  function removeAttachment(index) {
+    const a = attachments[index];
+    if (a && a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+    attachments.splice(index, 1);
+    renderPreviews();
+  }
+
+  function renderPreviews() {
+    previewStrip.innerHTML = '';
+
+    if (attachments.length === 0) {
+      previewStrip.classList.remove('has-items');
+      return;
+    }
+    previewStrip.classList.add('has-items');
+
+    attachments.forEach(function(att, idx) {
+      const item = document.createElement('div');
+      item.className = 'preview-item';
+
+      if (att.type === 'image' && att.previewUrl) {
+        const img = document.createElement('img');
+        img.src = att.previewUrl;
+        img.alt = att.file.name;
+        item.appendChild(img);
+      } else if (att.type === 'audio') {
+        const playBtn = document.createElement('button');
+        playBtn.className = 'play-btn';
+        playBtn.textContent = '\u25B6';
+        playBtn.addEventListener('click', function(e) {
+          e.stopPropagation();
+          const audio = new Audio(URL.createObjectURL(att.file));
+          audio.play();
+        });
+        item.appendChild(playBtn);
+      } else if (att.type === 'video') {
+        if (att.frames && att.frames.length > 0) {
+          const img = document.createElement('img');
+          img.src = att.frames[0];
+          img.alt = 'Video frame';
+          item.appendChild(img);
+        }
+      }
+
+      const info = document.createElement('div');
+      info.className = 'preview-item-info';
+
+      const nameEl = document.createElement('div');
+      nameEl.className = 'preview-item-name';
+      const icon = att.type === 'image' ? '' : att.type === 'audio' ? '\uD83C\uDFB5 ' : '\uD83C\uDFAC ';
+      nameEl.textContent = icon + att.file.name;
+      info.appendChild(nameEl);
+
+      const sizeEl = document.createElement('div');
+      sizeEl.className = 'preview-item-size';
+      sizeEl.textContent = formatSize(att.file.size);
+      if (att.type === 'video' && att.frames) {
+        sizeEl.textContent += ' \u00B7 ' + att.frames.length + ' frames';
+      } else if (att.type === 'video' && !att.frames) {
+        sizeEl.textContent = 'Processing video...';
+        sizeEl.classList.add('processing-indicator');
+      }
+      info.appendChild(sizeEl);
+
+      item.appendChild(info);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'preview-remove';
+      removeBtn.textContent = '\u00D7';
+      removeBtn.addEventListener('click', function() { removeAttachment(idx); });
+      item.appendChild(removeBtn);
+
+      previewStrip.appendChild(item);
+    });
+  }
+
+  // ---- Video frame extraction ----
+  function extractVideoFrames(entry) {
+    return new Promise(function(resolve) {
+      const video = document.createElement('video');
+      video.muted = true;
+      video.preload = 'auto';
+      const url = URL.createObjectURL(entry.file);
+      video.src = url;
+
+      video.addEventListener('loadedmetadata', function() {
+        const duration = video.duration;
+        const maxFrames = 10;
+        const interval = 1; // 1 fps
+        const totalFrames = Math.min(maxFrames, Math.floor(duration));
+        if (totalFrames < 1) {
+          entry.frames = [];
+          renderPreviews();
+          URL.revokeObjectURL(url);
+          resolve();
+          return;
+        }
+
+        const frames = [];
+        let currentFrame = 0;
+
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+
+        function seekNext() {
+          if (currentFrame >= totalFrames) {
+            entry.frames = frames;
+            entry.previewUrl = frames[0] || null;
+            renderPreviews();
+            URL.revokeObjectURL(url);
+            resolve();
+            return;
+          }
+          video.currentTime = currentFrame * interval;
+        }
+
+        video.addEventListener('seeked', function onSeeked() {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          ctx.drawImage(video, 0, 0);
+          frames.push(canvas.toDataURL('image/jpeg', 0.7));
+          currentFrame++;
+          // Update preview to show progress
+          const sizeEls = previewStrip.querySelectorAll('.processing-indicator');
+          sizeEls.forEach(function(el) {
+            el.textContent = 'Processing video... ' + frames.length + '/' + totalFrames + ' frames';
+          });
+          seekNext();
+        });
+
+        seekNext();
+      });
+
+      video.addEventListener('error', function() {
+        entry.frames = [];
+        renderPreviews();
+        URL.revokeObjectURL(url);
+        resolve();
+      });
+    });
+  }
+
+  // ---- Read file as base64 data URL ----
+  function readFileAsDataURL(file) {
+    return new Promise(function(resolve, reject) {
+      const reader = new FileReader();
+      reader.onload = function() { resolve(reader.result); };
+      reader.onerror = function() { reject(reader.error); };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // ---- Build multimodal content array ----
+  async function buildContentArray(text, atts) {
+    if (atts.length === 0) {
+      return text;
+    }
+
+    const content = [];
+
+    if (text) {
+      content.push({ type: 'text', text: text });
+    }
+
+    for (const att of atts) {
+      if (att.type === 'image') {
+        const dataUrl = await readFileAsDataURL(att.file);
+        content.push({
+          type: 'image_url',
+          image_url: { url: dataUrl }
+        });
+      } else if (att.type === 'audio') {
+        const dataUrl = await readFileAsDataURL(att.file);
+        // Extract base64 portion after the data URL prefix
+        const base64 = dataUrl.split(',')[1];
+        const format = att.file.name.endsWith('.wav') ? 'wav' : 'webm';
+        content.push({
+          type: 'input_audio',
+          input_audio: { data: base64, format: format }
+        });
+      } else if (att.type === 'video' && att.frames && att.frames.length > 0) {
+        // Send each extracted frame as an image
+        content.push({ type: 'text', text: '[Video: ' + att.file.name + ' - ' + att.frames.length + ' frames at 1fps]' });
+        for (const frame of att.frames) {
+          content.push({
+            type: 'image_url',
+            image_url: { url: frame }
+          });
+        }
+      }
+    }
+
+    return content;
+  }
+
+  // ---- Image viewer ----
+  imageViewer.addEventListener('click', function() {
+    imageViewer.classList.remove('active');
+  });
+
+  function showImageViewer(src) {
+    viewerImg.src = src;
+    imageViewer.classList.add('active');
+  }
+
+  // ---- Health check ----
   checkHealth();
 
   async function checkHealth() {
@@ -394,17 +999,14 @@
       if (!resp.ok) throw new Error('health check failed');
       const data = await resp.json();
 
-      // Parse device statuses from gateway health response
       const devices = data.devices || data.tiers || {};
       let miniOnline = false;
       let mbpOnline = false;
 
-      // Try common response shapes
       if (data.status === 'ok' || data.status === 'healthy' || resp.ok) {
-        miniOnline = true; // Gateway is on Mac Mini, so if health returns it's online
+        miniOnline = true;
       }
 
-      // Look for device-level info
       if (typeof devices === 'object') {
         for (const [key, val] of Object.entries(devices)) {
           const name = key.toLowerCase();
@@ -439,15 +1041,50 @@
   }
 
   // ---- Message rendering ----
-  function addMessage(role, text, routingInfo) {
-    if (emptyState) emptyState.remove();
+  function addMessage(role, text, routingInfo, messageAttachments) {
+    if (emptyState && emptyState.parentNode) emptyState.remove();
     const div = document.createElement('div');
     div.className = 'msg ' + role;
 
+    // Render attachments for user messages
+    if (messageAttachments && messageAttachments.length > 0) {
+      const attContainer = document.createElement('div');
+      attContainer.className = 'msg-attachments';
+
+      messageAttachments.forEach(function(att) {
+        if (att.type === 'image' && att.previewUrl) {
+          const img = document.createElement('img');
+          img.src = att.previewUrl;
+          img.alt = att.file.name;
+          img.addEventListener('click', function() { showImageViewer(att.previewUrl); });
+          attContainer.appendChild(img);
+        } else if (att.type === 'audio') {
+          const audio = document.createElement('audio');
+          audio.controls = true;
+          audio.src = URL.createObjectURL(att.file);
+          attContainer.appendChild(audio);
+        } else if (att.type === 'video') {
+          const label = document.createElement('div');
+          label.className = 'msg-media-label';
+          const frameCount = att.frames ? att.frames.length : 0;
+          label.textContent = '\uD83C\uDFAC Video (' + frameCount + ' frames analyzed)';
+          attContainer.appendChild(label);
+        }
+      });
+
+      div.appendChild(attContainer);
+    }
+
     if (role === 'assistant') {
-      div.innerHTML = renderMarkdown(text);
-    } else {
-      div.textContent = text;
+      const textDiv = document.createElement('div');
+      textDiv.className = 'msg-text';
+      textDiv.innerHTML = renderMarkdown(text);
+      div.appendChild(textDiv);
+    } else if (text) {
+      const textDiv = document.createElement('div');
+      textDiv.className = 'msg-text';
+      textDiv.textContent = text;
+      div.appendChild(textDiv);
     }
 
     if (routingInfo) {
@@ -468,7 +1105,7 @@
   }
 
   function addTyping() {
-    if (emptyState) emptyState.remove();
+    if (emptyState && emptyState.parentNode) emptyState.remove();
     const div = document.createElement('div');
     div.className = 'typing';
     div.id = 'typing';
@@ -483,26 +1120,19 @@
     if (el) el.remove();
   }
 
-  // ---- Simple markdown-ish rendering ----
+  // ---- Simple markdown rendering ----
   function renderMarkdown(text) {
-    // Escape HTML
     let html = text
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
 
-    // Code blocks
     html = html.replace(/```(\w*)\n([\s\S]*?)```/g, function(_, lang, code) {
       return '<pre><code>' + code.trim() + '</code></pre>';
     });
 
-    // Inline code
     html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-
-    // Bold
     html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-
-    // Italic
     html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
 
     return html;
@@ -511,22 +1141,32 @@
   // ---- Send message ----
   async function sendMessage() {
     const text = inputEl.value.trim();
-    if (!text || sending) return;
+    const currentAttachments = attachments.slice();
+
+    if ((!text && currentAttachments.length === 0) || sending) return;
 
     sending = true;
     sendBtn.disabled = true;
     hideError();
-    addMessage('user', text);
+
+    // Show user message with attachments
+    addMessage('user', text, null, currentAttachments);
+
+    // Clear input and attachments
     inputEl.value = '';
     inputEl.style.height = 'auto';
+    attachments = [];
+    renderPreviews();
 
     const tier = tierEl.value;
     addTyping();
     const startTime = Date.now();
 
     try {
+      const content = await buildContentArray(text, currentAttachments);
+
       const body = {
-        messages: [{ role: 'user', content: text }],
+        messages: [{ role: 'user', content: content }],
         stream: false
       };
       if (tier !== 'auto') {
@@ -542,7 +1182,7 @@
       removeTyping();
 
       if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: 'Request failed (' + resp.status + ')' }));
+        const err = await resp.json().catch(function() { return { error: 'Request failed (' + resp.status + ')' }; });
         showError(err.error || err.detail || 'Request failed');
         addMessage('assistant', 'Error: ' + (err.error || err.detail || resp.statusText));
         return;
@@ -551,17 +1191,15 @@
       const data = await resp.json();
       const latency = Date.now() - startTime;
 
-      // Extract the assistant's reply
-      let content = '';
+      let responseContent = '';
       if (data.choices && data.choices[0]) {
-        content = data.choices[0].message?.content || data.choices[0].text || '';
+        responseContent = data.choices[0].message?.content || data.choices[0].text || '';
       } else if (data.content) {
-        content = data.content;
+        responseContent = data.content;
       } else if (data.response) {
-        content = data.response;
+        responseContent = data.response;
       }
 
-      // Build routing info
       const routing = {
         tier: data.tier || data.model_tier || tier,
         model: data.model || (data.choices && data.choices[0]?.model) || null,
@@ -569,7 +1207,7 @@
         tokens: data.usage?.total_tokens || null
       };
 
-      addMessage('assistant', content || '(empty response)', routing);
+      addMessage('assistant', responseContent || '(empty response)', routing);
 
     } catch (e) {
       removeTyping();
