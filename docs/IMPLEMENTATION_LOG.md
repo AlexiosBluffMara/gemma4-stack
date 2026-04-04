@@ -128,9 +128,56 @@ Expose the inference stack to other devices on a Tailscale mesh network, enablin
 
 ### Architecture
 ```
-[Remote Device] --Tailscale--> [Mac Mini M4 100.x.x.x]
+[Remote Device] --Tailscale--> [Mac Mini M4 100.75.223.113]
                                   |
-                                  +-- :11434 Ollama (E2B/E4B)
-                                  +-- :8081 llama-server (26B)
-                                  +-- :8080 API Gateway (router)
+                                  +-- :8082 mlx_lm (E2B fast tier)
+                                  +-- :8083 mlx_lm (E4B primary tier)
+                                  +-- :8081 llama-server (26B heavy tier)
+                                  +-- :8080 FastAPI Gateway (auto-router)
 ```
+
+### Status: ✅ LIVE
+- **Tailscale IP:** `100.75.223.113`
+- **Network Extension:** Installed via official .pkg from pkgs.tailscale.com (Homebrew CLI alone insufficient)
+- **Version note:** Client 1.96.4 / server 1.96.5 minor mismatch — no functional impact
+- **Gateway binding:** `uvicorn --host 0.0.0.0` — responds on Tailscale interface confirmed
+
+### Confirmed Working Endpoints (via Tailscale)
+```
+GET  http://100.75.223.113:8080/health               → {"tiers":{"fast":"ok","primary":"ok","heavy":"ok"}}
+POST http://100.75.223.113:8080/v1/chat/completions  → OpenAI-compatible, auto-routes
+POST http://100.75.223.113:8080/classify             → Fast tier only, ~270ms
+POST http://100.75.223.113:8080/compress             → Primary tier only, ~1.6s
+GET  http://100.75.223.113:8080/metrics              → Per-tier latency stats
+```
+
+### Docker Status
+Docker Desktop not installed on this machine. Native macOS stack is the production path.
+Docker Compose files are included in the repo for cross-platform/portability use cases.
+Install from: https://www.docker.com/products/docker-desktop/
+
+---
+
+## Final Implementation Summary
+
+### What Was Built vs Plan
+| Component | Planned | Actual | Status |
+|-----------|---------|--------|--------|
+| Fast tier | Ollama E2B | mlx_lm E2B 4-bit (MLX) | ✅ Better — 126 tok/s vs planned ~18 tok/s |
+| Primary tier | Ollama E4B | mlx_lm E4B 4-bit (MLX) | ✅ Better — 32 tok/s vs planned ~5 tok/s |
+| Heavy tier | Ollama 27B | llama.cpp 26B-A4B GGUF CPU | ⚠️ Different — 1.6 tok/s (GPU OOM on 16GB) |
+| Gateway | FastAPI | FastAPI (same) | ✅ Exact match |
+| Network | Not in plan | Tailscale mesh | ✅ Added, live at 100.75.223.113 |
+| Docker | Not in plan | Docker Compose (Ollama + llama.cpp) | ✅ Files ready, Desktop not installed |
+| Notebook | Planned | 9-cell Jupyter with all metrics | ✅ Complete |
+| GitHub | Planned | AlexiosBluffMara/gemma4-stack (25 files) | ✅ Public, live |
+
+### Real-World Performance Numbers
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Fast classify latency | 0.27s | E2B "greeting/fyi" routing |
+| Primary summarize | 1.57s | E4B 20-word compress |
+| Heavy generation | ~1.6 tok/s | 26B CPU-only, mmap |
+| Gateway overhead | <5ms | httpx async forwarding |
+| Cold start (MLX) | ~3s | Model already loaded by LaunchAgent |
+| Heavy cold start | ~8s | llama-server --no-warmup |
