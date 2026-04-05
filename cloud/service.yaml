@@ -1,0 +1,116 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: gemma4-proxy
+  labels:
+    cloud.googleapis.com/location: us-central1
+    app: gemma4-proxy
+    component: cloud-proxy
+    tier: frontend
+  annotations:
+    run.googleapis.com/launch-stage: BETA
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "3"
+        run.googleapis.com/startup-cpu-boost: "true"
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/sessionAffinity: "true"
+      labels:
+        app: gemma4-proxy
+        component: cloud-proxy
+    spec:
+      containerConcurrency: 100
+      timeoutSeconds: 600
+      containers:
+        # ---- Primary container: Gemma 4 Cloud Proxy ----
+        - name: app
+          image: us-central1-docker.pkg.dev/gemma4good/gemma4/gemma4-proxy:latest
+          ports:
+            - name: http1
+              containerPort: 8080
+          env:
+            # Route all outbound HTTP through the Tailscale sidecar proxy
+            - name: HTTP_PROXY
+              value: "http://localhost:1055"
+            - name: http_proxy
+              value: "http://localhost:1055"
+            - name: HTTPS_PROXY
+              value: "http://localhost:1055"
+            - name: https_proxy
+              value: "http://localhost:1055"
+            - name: ALL_PROXY
+              value: "socks5://localhost:1055"
+            # Do not route local traffic through Tailscale
+            - name: NO_PROXY
+              value: "localhost,127.0.0.1"
+            # Gateway URL uses the Mac Mini's Tailscale IP
+            # Traffic goes: app -> localhost:1055 (TS proxy) -> Tailscale mesh -> Mac Mini
+            - name: GATEWAY_URL
+              value: "http://100.75.223.113:8080"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "500m"
+            limits:
+              memory: "512Mi"
+              cpu: "1"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /_ready
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 2
+
+        # ---- Sidecar: Tailscale (joins your tailnet) ----
+        - name: tailscale
+          image: us-central1-docker.pkg.dev/gemma4good/gemma4/tailscale:latest
+          env:
+            - name: TS_AUTHKEY
+              valueFrom:
+                secretKeyRef:
+                  name: tailscale-auth-key
+                  key: latest
+            - name: TS_HOSTNAME
+              value: "gemma4-cloudrun"
+            - name: TS_STATE_DIR
+              value: "/var/lib/tailscale"
+            - name: TS_USERSPACE
+              value: "true"
+            - name: TS_SOCKS5_SERVER
+              value: "localhost:1055"
+            - name: TS_OUTBOUND_HTTP_PROXY_LISTEN
+              value: "localhost:1055"
+            - name: TS_AUTH_ONCE
+              value: "true"
+            - name: TS_ENABLE_HEALTH_CHECK
+              value: "true"
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "250m"
+            limits:
+              memory: "128Mi"
+              cpu: "500m"
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 9002
+            failureThreshold: 12
+            periodSeconds: 5
+          volumeMounts:
+            - name: tailscale-state
+              mountPath: /var/lib/tailscale
+
+      volumes:
+        - name: tailscale-state
+          emptyDir:
+            medium: Memory

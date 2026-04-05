@@ -1,0 +1,14 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/gemma4good/gemma4/gemma4-proxy:latest'
+      - '-f'
+      - 'proxy/Dockerfile'
+      - '.'
+
+images:
+  - 'us-central1-docker.pkg.dev/gemma4good/gemma4/gemma4-proxy:latest'
+
+timeout: 900s

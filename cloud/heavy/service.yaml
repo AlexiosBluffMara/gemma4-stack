@@ -1,0 +1,126 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: gemma4-heavy
+  labels:
+    cloud.googleapis.com/location: us-central1
+    app: gemma4-heavy
+    component: heavy-inference
+    tier: backend
+  annotations:
+    run.googleapis.com/launch-stage: BETA
+spec:
+  template:
+    metadata:
+      annotations:
+        # ── Scaling: scale to zero when idle ───────────────────────────────
+        autoscaling.knative.dev/minScale: "0"   # $0/hr when no requests
+        autoscaling.knative.dev/maxScale: "1"   # never run more than 1 GPU instance
+        # Keep instance alive for 15 minutes after last request before scaling down.
+        # Balances cold-start pain vs cost: $0.027 for 15min of L4 idle.
+        autoscaling.knative.dev/scaleDownDelay: "15m"
+
+        # ── Execution environment ───────────────────────────────────────────
+        run.googleapis.com/execution-environment: gen2
+
+        # ── GPU: NVIDIA L4 (24 GB VRAM) ────────────────────────────────────
+        run.googleapis.com/accelerator: nvidia-l4
+
+        # ── Ephemeral storage: 32 GB for model + temp files ────────────────
+        # Default is 1 GB — not enough for 15.6 GB GGUF model download.
+        run.googleapis.com/storage: 32Gi
+
+        # ── CPU boost during startup (helps speed up cold start) ───────────
+        run.googleapis.com/startup-cpu-boost: "true"
+
+      labels:
+        app: gemma4-heavy
+        component: heavy-inference
+
+    spec:
+      # Single concurrent request at a time (GPU inference is sequential)
+      containerConcurrency: 1
+      # Long timeout: cold start (~110s) + longest possible inference (~600s)
+      timeoutSeconds: 720
+
+      containers:
+        - name: heavy
+          image: us-central1-docker.pkg.dev/gemma4good/gemma4/gemma4-heavy:latest
+
+          ports:
+            - name: http1
+              containerPort: 8080
+
+          env:
+            # ── GCS model location ─────────────────────────────────────────
+            - name: GCS_BUCKET
+              value: "gemma4good-models"
+            - name: GCS_MODEL_BLOB
+              value: "gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
+
+            # ── HuggingFace model (fallback / primary if no GCS copy) ──────
+            - name: HF_REPO
+              value: "unsloth/gemma-4-26B-A4B-it-GGUF"
+            - name: HF_FILE
+              value: "gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf"
+
+            # ── Model config ───────────────────────────────────────────────
+            - name: N_GPU_LAYERS
+              value: "-1"       # all layers on L4 GPU
+            - name: CTX_SIZE
+              value: "8192"
+            - name: N_PARALLEL
+              value: "1"        # 1 parallel slot — scale via Cloud Run, not threads
+
+            # ── Auth: gateway sends this as Bearer token ───────────────────
+            - name: HEAVY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: heavy-api-key
+                  key: latest
+
+            # ── HuggingFace token (fallback download if GCS fails) ─────────
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: latest
+
+          resources:
+            requests:
+              # L4 GPU requires minimum 4 CPUs and 16 GB RAM per Cloud Run docs
+              cpu: "4"
+              memory: "16Gi"
+              # GPU accelerator (declared via annotation above)
+            limits:
+              cpu: "8"
+              memory: "24Gi"
+
+          # ── Startup probe: polls until model is loaded (up to 10 min) ────
+          # During the ~110s cold start the server won't be listening;
+          # this probe gives it up to 600 seconds before Cloud Run kills it.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            failureThreshold: 60    # 60 × 10s = 600s max startup time
+            periodSeconds: 10
+            successThreshold: 1
+
+          # ── Readiness probe: 503 until model is in GPU VRAM ──────────────
+          # Cloud Run caps readiness failureThreshold at 3.
+          readinessProbe:
+            httpGet:
+              path: /_ready
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+
+          # ── Liveness probe: restart container if it stops responding ──────
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 30
+            failureThreshold: 3
