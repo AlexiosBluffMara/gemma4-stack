@@ -1022,19 +1022,21 @@ async def process_video_chunked(
 # ---------------------------------------------------------------------------
 
 async def process_upload(
-    path: str,
-    filename: str,
+    path: Optional[str] = None,
+    filename: str = "",
     declared_mime: Optional[str] = None,
     tier: str = "primary",
     file_size: int = 0,
+    *,
+    data: Optional[bytes] = None,
 ) -> "ProcessedMedia | ChunkedVideoMedia | MediaError":
     """
     Process an uploaded media file end-to-end.
 
-    Operates on an already-on-disk file path — the gateway streams the upload
-    to disk before calling this function, so video files (up to 10 GB) are
-    never fully loaded into RAM.  Images and audio (which are bounded to 20 MB
-    and 50 MB respectively) are still read into memory for processing.
+    Accepts either an on-disk file path (``path``) or raw bytes (``data``).
+    The gateway streams large uploads to disk before calling this function so
+    that video files (up to 10 GB) are never fully loaded into RAM.  For
+    in-memory callers (e.g. unit tests), pass ``data=<bytes>`` instead.
 
     1. Reads the first 16 bytes for magic-byte type detection
     2. Enforces size limits per category
@@ -1045,15 +1047,65 @@ async def process_upload(
     For long videos (>60 s) → returns ChunkedVideoMedia (multiple model calls needed).
 
     Args:
-        path:          Path to the already-written upload file on disk
+        path:          Path to the already-written upload file on disk.
+                       Mutually exclusive with ``data``.
         filename:      Original filename (used for logging, sanitised internally)
         declared_mime: Client-declared MIME type (used as fallback only)
         tier:          Inference tier — controls frame budget for video
         file_size:     Known byte count (skip stat() call if provided)
+        data:          Raw bytes to process in memory (alternative to ``path``).
+                       Keyword-only.  When provided, a temporary file is created
+                       automatically so video chunking still works on disk.
 
     Returns:
         ProcessedMedia, ChunkedVideoMedia, or MediaError
     """
+    # ------------------------------------------------------------------
+    # If raw bytes were supplied, write them to a temporary file so the
+    # rest of the function can use the unified path-based code path.
+    # The temp file is removed at the end of this function.
+    # ------------------------------------------------------------------
+    _tmp_path: Optional[str] = None
+    if data is not None:
+        if path is not None:
+            return MediaError("Specify either 'path' or 'data', not both", "processing_failed")
+        if not data:
+            return MediaError("Empty file", "no_media")
+        try:
+            fd, _tmp_path = tempfile.mkstemp(suffix=Path(filename).suffix or ".bin")
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+            path = _tmp_path
+            file_size = len(data)
+        except OSError as exc:
+            return MediaError(f"Cannot write temporary file: {exc}", "processing_failed")
+    elif path is None:
+        return MediaError("Either 'path' or 'data' must be provided", "processing_failed")
+
+    try:
+        return await _process_upload_from_path(
+            path=path,
+            filename=filename,
+            declared_mime=declared_mime,
+            tier=tier,
+            file_size=file_size,
+        )
+    finally:
+        if _tmp_path is not None:
+            try:
+                os.unlink(_tmp_path)
+            except OSError:
+                pass
+
+
+async def _process_upload_from_path(
+    path: str,
+    filename: str,
+    declared_mime: Optional[str] = None,
+    tier: str = "primary",
+    file_size: int = 0,
+) -> "ProcessedMedia | ChunkedVideoMedia | MediaError":
+    """Internal implementation — operates on an already-on-disk file path."""
     # Step 0: Read file header for magic-byte detection (16 bytes is enough for all formats)
     try:
         with open(path, "rb") as fh:
