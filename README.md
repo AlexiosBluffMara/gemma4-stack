@@ -530,12 +530,18 @@ gemma4-stack/
 +-- README.md                          # This document
 +-- notebooks/
 |   +-- gemma4_local_inference.ipynb   # Guided setup notebook (Windows + Mac)
+|   +-- gemma4_zerowaste.ipynb         # Kaggle hackathon submission notebook
 +-- scripts/
 |   +-- gateway.py                     # FastAPI gateway (tier routing, circuit breakers)
 |   +-- start_fast.sh                  # Launch E2B MLX server
 |   +-- start_primary.sh              # Launch E4B MLX server
 |   +-- benchmark.py                   # Throughput benchmarking tool
 |   +-- media.py                       # Media processing (resize, convert, chunk)
+|   +-- pantry_scanner.py              # [ZeroWaste] Gemma 4 multimodal pantry vision
+|   +-- bulk_optimizer.py              # [ZeroWaste] LP solver for bulk-buy optimization
+|   +-- recipe_engine.py               # [ZeroWaste] Zero-waste recipe generation
+|   +-- impact_tracker.py              # [ZeroWaste] Environmental/social impact metrics
+|   +-- zerowaste_api.py               # [ZeroWaste] FastAPI app combining all modules
 +-- cloud/
 |   +-- proxy/
 |   |   +-- main.py                    # Cloud Run proxy (auth, rate limit, Tailscale tunnel)
@@ -550,13 +556,113 @@ gemma4-stack/
 |   |   +-- deploy.sh                  # Heavy tier deployment script (6 steps)
 |   +-- web/
 |       +-- index.html                 # Single-file SPA (Apple HIG, responsive)
+|       +-- zerowaste.html             # [ZeroWaste] PWA for nutrition guardian
 +-- tests/
 |   +-- test_e2e.py                    # End-to-end tests (health, media, cloud)
+|   +-- test_zerowaste.py              # ZeroWaste module tests (54 tests)
 |   +-- conftest.py                    # Test fixtures
 +-- docs/
     +-- API.md                         # OpenAI-compatible API reference
     +-- IMPLEMENTATION_LOG.md          # Detailed implementation journal
 ```
+
+---
+
+## 15. GemmaZeroWaste: Hackathon Submission (Gemma 4 Good)
+
+> **On-Device Multimodal Nutrition Guardian for Chicago Food Deserts**
+>
+> [![Hackathon: Gemma 4 Good](https://img.shields.io/badge/Hackathon-Gemma_4_Good-FF6F00.svg)](https://www.kaggle.com/competitions/gemma-4-good)
+> [![Tracks: Health • Resilience • Education • Equity](https://img.shields.io/badge/Tracks-Health_%E2%80%A2_Resilience_%E2%80%A2_Education_%E2%80%A2_Equity-34d399.svg)]()
+
+### Problem
+
+Chicago has **37 neighborhoods** classified as food deserts, where **633,631 residents** (23% of the city) lack reliable access to affordable, nutritious food. Household food waste in the US averages **31.9%** of purchased food—contributing to 8-10% of global GHG emissions via landfill methane. In food-insecure communities, this waste represents both economic loss and nutritional deficit.
+
+### Solution
+
+GemmaZeroWaste is a **single mobile-first app** (PWA) powered exclusively by **quantized Gemma 4 edge models** that:
+
+1. **📷 Scans pantry shelves** via camera → Gemma 4 multimodal vision identifies all food items
+2. **🧮 Optimizes bulk purchases** via linear programming (min cᵀx s.t. Ax ≥ b for nutrition/cost/waste)
+3. **🍳 Generates zero-waste recipes** prioritizing items expiring soonest
+4. **📊 Tracks impact** — quantifiable waste reduction, CO₂e savings, nutrition improvement
+
+### Gemma 4 Features Used
+
+| Feature | Usage |
+|---------|-------|
+| **Multimodal Vision** | Pantry shelf image → structured food item inventory |
+| **Native Function Calling** | `register_pantry_items()` and `create_meal_plan()` structured extraction |
+| **Edge Inference** | All processing on-device — no images or data leave the phone |
+| **Offline-First** | Works without internet; LP solver runs locally via PuLP |
+
+### Track Coverage
+
+| Track | How We Address It |
+|-------|-------------------|
+| **Health & Sciences** | Personalized nutrition for multi-generational households; diabetes/obesity prevention |
+| **Global Resilience** | Quantifiable CO₂e reduction (2.5 kg CO₂e per kg food waste avoided); disaster-ready offline |
+| **Future of Education** | Embedded cooking/nutrition literacy; "why this cuts waste" explanations |
+| **Digital Equity / Safety** | No data plan required; local-only processing; accessible to low-income families |
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Mobile Device (PWA / iOS / Android)                     │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │  Camera → Gemma 4 Vision (E4B, 4-bit quantized)  │   │
+│  │  → register_pantry_items() function call          │   │
+│  └──────────────┬───────────────────────────────────┘   │
+│                 │                                        │
+│  ┌──────────────▼───────────────────────────────────┐   │
+│  │  PuLP LP Solver (fully offline)                   │   │
+│  │  min cᵀx s.t. Ax ≥ b (nutrition, cost, waste)    │   │
+│  └──────────────┬───────────────────────────────────┘   │
+│                 │                                        │
+│  ┌──────────────▼───────────────────────────────────┐   │
+│  │  Gemma 4 Recipe Engine (function calling)         │   │
+│  │  → create_meal_plan() with zero-waste priority    │   │
+│  └──────────────┬───────────────────────────────────┘   │
+│                 │                                        │
+│  ┌──────────────▼───────────────────────────────────┐   │
+│  │  Impact Dashboard (deterministic local calc)      │   │
+│  │  CO₂e · Waste % · Nutrition Score · SNAP $/meal   │   │
+│  └──────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Quick Start
+
+```bash
+# Install dependencies
+pip install fastapi uvicorn httpx pulp python-multipart
+
+# Run the ZeroWaste API
+cd scripts && python zerowaste_api.py
+
+# Open PWA at http://localhost:8090/zerowaste
+```
+
+### Test Suite
+
+```bash
+cd tests && python3 -m pytest test_zerowaste.py -v
+# 54 tests — all pass offline, no gateway needed
+```
+
+### Impact Metrics (Sample Week, 3-Person Household)
+
+| Metric | Value |
+|--------|-------|
+| Budget | $58.50/week (SNAP average) |
+| Food waste | ~9.5% (vs. US avg 31.9%) |
+| Waste reduction | 22.4 percentage points |
+| CO₂e avoided | 3.1 kg/week |
+| Cost per person per day | $2.79 |
+| Nutrition coverage | 70-100% across 6 key nutrients |
 
 ---
 
