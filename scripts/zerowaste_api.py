@@ -23,7 +23,13 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
-from bulk_optimizer import BulkOptimizer, BULK_CATALOG, OptimizationResult
+from bulk_optimizer import (
+    BulkOptimizer,
+    BULK_CATALOG,
+    DEFAULT_BUDGET_WEEKLY,
+    DEFAULT_HOUSEHOLD_SIZE,
+    OptimizationResult,
+)
 from impact_tracker import (
     CHICAGO_FOOD_DESERT_STATS,
     ImpactTracker,
@@ -376,12 +382,6 @@ async def serve_zerowaste_ui():
     if html_path.exists():
         return FileResponse(html_path, media_type="text/html")
     raise HTTPException(404, "ZeroWaste UI not found")
-
-
-# ---------------------------------------------------------------------------
-# Imports for Form defaults (avoid circular)
-# ---------------------------------------------------------------------------
-from bulk_optimizer import DEFAULT_BUDGET_WEEKLY, DEFAULT_HOUSEHOLD_SIZE  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
