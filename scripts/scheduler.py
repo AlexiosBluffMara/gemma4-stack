@@ -285,21 +285,26 @@ class TabularQScheduler:
         candidates: list[tuple[int, int]] = []
         for i, task in enumerate(self.env.tasks()):
             if state.get(task.id, SchedulerEnv.UNSCHEDULED) == SchedulerEnv.UNSCHEDULED:
+                max_valid_start = self.env.n_slots - task.duration
+                if max_valid_start < task.earliest:
+                    # Task is infeasible in this environment; skip it
+                    continue
                 max_q = max(
-                    (self._q_val(i, s) for s in range(task.earliest, self.env.n_slots - task.duration + 1)),
+                    (self._q_val(i, s) for s in range(task.earliest, max_valid_start + 1)),
                     default=0.0,
                 )
                 best_slots = [
-                    s for s in range(task.earliest, self.env.n_slots - task.duration + 1)
+                    s for s in range(task.earliest, max_valid_start + 1)
                     if abs(self._q_val(i, s) - max_q) < 1e-9
                 ]
                 if best_slots:
                     candidates.append((i, self._rng.choice(best_slots)))
         if not candidates:
-            # All scheduled — pick any task/slot
+            # All scheduled (or all infeasible) — pick any task/slot
             i = self._rng.randrange(self.env.n_tasks)
             task = self.env.tasks()[i]
-            slot = self._rng.randint(task.earliest, max(task.earliest, self.env.n_slots - task.duration))
+            max_valid_start = self.env.n_slots - task.duration
+            slot = self._rng.randint(task.earliest, max(task.earliest, max_valid_start))
             return i, slot
         return self._rng.choice(candidates)
 
@@ -315,8 +320,12 @@ class TabularQScheduler:
         else:
             i = self._rng.choice(unscheduled)
         task = self.env.tasks()[i]
-        max_start = max(task.earliest, self.env.n_slots - task.duration)
-        slot = self._rng.randint(task.earliest, max_start)
+        max_valid_start = self.env.n_slots - task.duration
+        if max_valid_start < task.earliest:
+            # Task is infeasible — step() will return a penalty; return earliest anyway
+            slot = task.earliest
+        else:
+            slot = self._rng.randint(task.earliest, max_valid_start)
         return i, slot
 
     # ------------------------------------------------------------------
